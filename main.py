@@ -1,10 +1,12 @@
 import os
 import re
+import random
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatPermissions
 from aiogram.client.default import DefaultBotProperties
 
 # ==================== КОНФИГ ====================
@@ -24,6 +26,11 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
+
+# Хранилище активных временных банов: {chat_id: {user_id: until_datetime}}
+TEMP_BANS = {}
+# Хранилище активных мутов: {chat_id: {user_id: until_datetime}}
+TEMP_MUTES = {}
 
 # ==================== СПИСКИ ЗАПРЕЩЁННЫХ СЛОВ ====================
 
@@ -342,52 +349,405 @@ BAD_WORD_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# ==================== ЦЕНЗУРА ====================
+# ==================== ТИТУЛЫ (для /титул) ====================
 
-def censor_text(text: str) -> tuple[str, bool]:
-    found = False
+TITLES = [
+    "🐉 Повелитель драконов",
+    "🧙 Верховный маг",
+    "👑 Император чата",
+    "🤡 Шут гороховый",
+    "🥔 Картофельный магнат",
+    "🐸 Жаба-путешественница",
+    "🦆 Утка-ниндзя",
+    "🐱 Кот-философ",
+    "🐶 Пёс-хранитель",
+    "🦊 Хитрый лис",
+    "🐻 Медведь-шаман",
+    "🦉 Сова-всезнайка",
+    "🐼 Панда-ленивец",
+    "🦁 Лев-царь зверей",
+    "🐧 Пингвин-джентельмен",
+    "🦄 Единорог-мечтатель",
+    "🐲 Дракон-хранитель",
+    "👾 Космический захватчик",
+    "🤖 Робот-терминатор",
+    "👻 Призрак-невидимка",
+    "🧛 Вампир-полуночник",
+    "🧟 Зомби-апокалипсис",
+    "🧜 Русалка-соблазнительница",
+    "🧚 Фея-волшебница",
+    "🦸 Супергерой",
+    "🦹 Злодей-мастермайнд",
+    "🥷 Ниндзя-невидимка",
+    "🤠 Ковбой Дикого Запада",
+    "👽 Пришелец с Марса",
+    "🎃 Тыква-хэллоуин",
+    "🎅 Дед Мороз",
+    "🧝 Эльф-лучник",
+    "🧞 Джинн-исполнитель желаний",
+    "🗿 Каменный истукан",
+    "🌮 Тако-гурман",
+    "🍕 Пицца-мастер",
+    "🍔 Бургер-король",
+    "🍣 Суши-сенсей",
+    "☕ Кофейный маньяк",
+    "🍺 Пивной барон",
+    "🎮 Геймер-легенда",
+    "💻 Кодер-хакер",
+    "🎸 Рок-звезда",
+    "🎤 Рэпер-гуф",
+    "🎨 Художник-абстракционист",
+    "📚 Книжный червь",
+    "🧠 Мозговой штурм",
+    "💪 Качок-атлет",
+    "🏃 Бегун-марафонец",
+    "🛌 Лежебока-профессионал",
+    "🍿 Кинокритик",
+    "🎭 Актёр-драмы",
+    "🎪 Клоун-эквилибрист",
+    "🃏 Джокер-шутник",
+    "♟️ Шахматный гроссмейстер",
+    "🎯 Снайпер-меткий",
+    "🏆 Чемпион чата",
+]
 
-    def replace_match(match: re.Match) -> str:
-        nonlocal found
-        found = True
-        word = match.group(0)
-        return word[0] + "*" * (len(word) - 1)
+# ==================== МАГИЧЕСКИЙ ШАР ====================
 
-    text = MAT_PATTERN.sub(replace_match, text)
-    text = BAD_WORD_PATTERN.sub(replace_match, text)
-    return text, found
+MAGIC_8_BALL = [
+    "🎱 Да, однозначно.",
+    "🎱 Нет, даже не думай.",
+    "🎱 Возможно.",
+    "🎱 Спроси позже.",
+    "🎱 Не могу сказать сейчас.",
+    "🎱 Абсолютно точно.",
+    "🎱 Скорее нет, чем да.",
+    "🎱 Скорее да, чем нет.",
+    "🎱 Не рассчитывай на это.",
+    "🎱 Все звёзды за.",
+    "🎱 Мои источники говорят «нет».",
+    "🎱 Определённо да.",
+    "🎱 Сомневаюсь.",
+    "🎱 Знаки говорят «да».",
+    "🎱 Туманно, попробуй ещё раз.",
+    "🎱 Да, но осторожно.",
+    "🎱 Лучше не спрашивай.",
+    "🎱 Всё возможно в этом мире.",
+    "🎱 Судьба решит за тебя.",
+    "🎱 Я бы на твоём месте подумал.",
+]
 
-# ==================== ХЕНДЛЕРЫ ====================
+# ==================== УТИЛИТЫ ====================
 
-# aiogram автоматически отрезает @username от команды,
-# поэтому Command("start") срабатывает и на /start, и на /start@Cenzyra1Bot.
-# Отдельные хендлеры для @-версии не нужны — Telegram передаёт их одинаково.
+def has_bad_words(text: str) -> bool:
+    return bool(MAT_PATTERN.search(text) or BAD_WORD_PATTERN.search(text))
+
+
+def extract_target_user(message: types.Message):
+    """
+    Возвращает (user_id, display_name) цели:
+    - из reply, если это ответ на сообщение
+    - из @mention или text_mention в тексте
+    """
+    # 1) Если это ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        return u.id, u.full_name
+
+    # 2) Если в тексте есть @username или text_mention
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                return entity.user.id, entity.user.full_name
+            if entity.type == "mention":
+                # @username — ID не узнаем без резолва, вернём username
+                username = message.text[entity.offset:entity.offset + entity.length]
+                return None, username
+
+    return None, None
+
+
+async def is_admin(message: types.Message) -> bool:
+    """Проверяет, является ли автор админом в чате."""
+    if message.chat.type == "private":
+        return True
+    try:
+        member = await message.chat.get_member(message.from_user.id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+async def bot_can_restrict(message: types.Message) -> bool:
+    """Проверяет, может ли бот ограничивать участников."""
+    try:
+        me = await message.chat.get_member((await bot.get_me()).id)
+        return getattr(me, "can_restrict_members", False)
+    except Exception:
+        return False
+
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот-цензор.\n\n"
-        "Добавь меня в чат как администратора с правом «Удаление сообщений», "
-        "и я буду автоматически удалять мат и неприличные выражения.\n\n"
-        "📌 Напиши /help для подробностей."
+        "👋 Привет! Я бот-цензор и не только.\n\n"
+        "🛡 Удаляю мат автоматически\n"
+        "🎲 Имею кучу развлекательных команд\n"
+        "🔨 Могу модерировать чат\n\n"
+        "📌 Напиши /помощь для списка команд."
     )
 
 
-@dp.message(Command("help"))
+@dp.message(Command("помощь", "help"))
 async def cmd_help(message: types.Message):
     await message.answer(
         "🛡 <b>Бот-цензор</b>\n\n"
-        "• Автоматически удаляет мат и оскорбления\n"
-        "• Предупреждает нарушителя\n\n"
-        "<b>Для работы в чате:</b>\n"
-        "1. Добавьте бота в группу\n"
-        "2. Выдайте права администратора\n"
-        "3. Включите право «Удаление сообщений»\n\n"
-        "<b>В группах команды можно вызывать с упоминанием:</b>\n"
-        "<code>/start@Cenzyra1Bot</code>\n"
-        "<code>/help@Cenzyra1Bot</code>"
+        "<b>🎲 Развлечения:</b>\n"
+        "/кнб — камень-ножницы-бумага\n"
+        "/кубик — бросить кубик (1–6)\n"
+        "/монетка — орёл или решка\n"
+        "/титул @user — выдать смешной титул\n"
+        "/шар &lt;вопрос&gt; — магический шар\n\n"
+        "<b>🔨 Модерация (для админов):</b>\n"
+        "/кик @user — кикнуть участника\n"
+        "/бан @user — забанить\n"
+        "/врембан @user &lt;мин&gt; — временный бан\n"
+        "/мут @user &lt;мин&gt; — замутить\n"
+        "/размут @user — снять мут\n\n"
+        "💡 <i>Вместо @user можно ответить (reply) на сообщение.</i>"
     )
 
+
+# ==================== РАЗВЛЕКАТЕЛЬНЫЕ КОМАНДЫ ====================
+
+@dp.message(Command("кнб"))
+async def cmd_rps(message: types.Message):
+    choices = ["✊ Камень", "✌️ Ножницы", "✋ Бумага"]
+    bot_choice = random.choice(choices)
+    await message.answer(
+        f"🤖 Мой выбор: <b>{bot_choice}</b>\n\n"
+        f"А ты что выберешь? Напиши: камень / ножницы / бумага"
+    )
+
+
+@dp.message(Command("кубик"))
+async def cmd_dice(message: types.Message):
+    value = random.randint(1, 6)
+    await message.answer(f"🎲 Выпало: <b>{value}</b>")
+
+
+@dp.message(Command("монетка"))
+async def cmd_coin(message: types.Message):
+    result = random.choice(["🪙 Орёл", "🪙 Решка"])
+    await message.answer(f"Подбрасываю... <b>{result}</b>")
+
+
+@dp.message(Command("титул"))
+async def cmd_title(message: types.Message):
+    user_id, name = extract_target_user(message)
+
+    if name is None:
+        # Нет цели — выдаём титул самому автору
+        name = message.from_user.full_name
+        mention = message.from_user.mention_html()
+    else:
+        mention = f'<a href="tg://user?id={user_id}">{name}</a>' if user_id else name
+
+    title = random.choice(TITLES)
+    await message.answer(f"👑 {mention} получает титул:\n\n<b>{title}</b>")
+
+
+@dp.message(Command("шар"))
+async def cmd_ball(message: types.Message):
+    # Отрезаем команду от текста
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("🔮 Задай вопрос: <code>/шар Я стану миллионером?</code>")
+        return
+
+    question = parts[1].strip()
+    answer = random.choice(MAGIC_8_BALL)
+    await message.answer(f"❓ <i>{question}</i>\n\n{answer}")
+
+
+# ==================== МОДЕРАЦИЯ ====================
+
+@dp.message(Command("кик"))
+async def cmd_kick(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ У меня нет прав на ограничение участников.")
+        return
+
+    user_id, name = extract_target_user(message)
+    if user_id is None:
+        await message.reply(
+            "❌ Укажи пользователя через reply или @username "
+            "(у @username нужен user_id — лучше отвечай reply)."
+        )
+        return
+
+    try:
+        await message.chat.ban(user_id)
+        await message.chat.unban(user_id)  # сразу разбаниваем = кик
+        await message.answer(f"👢 {name} кикнут из чата.")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось кикнуть: {e}")
+
+
+@dp.message(Command("бан"))
+async def cmd_ban(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ У меня нет прав на ограничение участников.")
+        return
+
+    user_id, name = extract_target_user(message)
+    if user_id is None:
+        await message.reply(
+            "❌ Укажи пользователя через reply или @username."
+        )
+        return
+
+    try:
+        await message.chat.ban(user_id)
+        await message.answer(f"🔨 {name} забанен навсегда.")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось забанить: {e}")
+
+
+@dp.message(Command("врембан"))
+async def cmd_tempban(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ У меня нет прав на ограничение участников.")
+        return
+
+    # Парсим: /врембан <цель> <минуты>
+    # Цель может быть из reply, а минуты — второй аргумент
+    args = (message.text or "").split()
+    minutes = None
+
+    # Если reply — минуты во втором слове
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user_id = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.full_name
+        if len(args) >= 2 and args[1].isdigit():
+            minutes = int(args[1])
+    else:
+        # Без reply: /врембан @user 30
+        user_id, name = extract_target_user(message)
+        if len(args) >= 3 and args[-1].isdigit():
+            minutes = int(args[-1])
+
+    if user_id is None:
+        await message.reply("❌ Укажи пользователя (reply) и время в минутах.")
+        return
+    if not minutes or minutes <= 0:
+        await message.reply("❌ Укажи время в минутах, например: <code>/врембан 30</code>")
+        return
+
+    try:
+        await message.chat.ban(user_id)
+        until = datetime.now() + timedelta(minutes=minutes)
+        TEMP_BANS.setdefault(message.chat.id, {})[user_id] = until
+        await message.answer(f"⏱ {name} забанен на <b>{minutes} мин.</b>")
+
+        # Планируем разбан
+        asyncio.create_task(_auto_unban(message.chat.id, user_id, minutes))
+    except Exception as e:
+        await message.reply(f"❌ Не удалось забанить: {e}")
+
+
+async def _auto_unban(chat_id: int, user_id: int, minutes: int):
+    await asyncio.sleep(minutes * 60)
+    try:
+        await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+        TEMP_BANS.get(chat_id, {}).pop(user_id, None)
+        await bot.send_message(chat_id, f"✅ Временный бан истёк, пользователь разбанен.")
+    except Exception as e:
+        logging.warning(f"Не удалось разбанить: {e}")
+
+
+@dp.message(Command("мут"))
+async def cmd_mute(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ У меня нет прав на ограничение участников.")
+        return
+
+    args = (message.text or "").split()
+    minutes = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user_id = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.full_name
+        if len(args) >= 2 and args[1].isdigit():
+            minutes = int(args[1])
+    else:
+        user_id, name = extract_target_user(message)
+        if len(args) >= 3 and args[-1].isdigit():
+            minutes = int(args[-1])
+
+    if user_id is None:
+        await message.reply("❌ Укажи пользователя (reply) и время в минутах.")
+        return
+    if not minutes or minutes <= 0:
+        await message.reply("❌ Укажи время в минутах, например: <code>/мут 15</code>")
+        return
+
+    try:
+        until = datetime.now() + timedelta(minutes=minutes)
+        await message.chat.restrict(
+            user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until
+        )
+        TEMP_MUTES.setdefault(message.chat.id, {})[user_id] = until
+        await message.answer(f"🔇 {name} замучен на <b>{minutes} мин.</b>")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось замутить: {e}")
+
+
+@dp.message(Command("размут"))
+async def cmd_unmute(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+
+    user_id, name = extract_target_user(message)
+    if user_id is None:
+        await message.reply("❌ Укажи пользователя через reply.")
+        return
+
+    try:
+        await message.chat.restrict(
+            user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_send_polls=True,
+            )
+        )
+        TEMP_MUTES.get(message.chat.id, {}).pop(user_id, None)
+        await message.answer(f"🔊 {name} размучен.")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось размутить: {e}")
+
+
+# ==================== ФИЛЬТР МАТА (должен быть ПОСЛЕДНИМ) ====================
 
 @dp.message()
 async def filter_messages(message: types.Message):
@@ -396,37 +756,36 @@ async def filter_messages(message: types.Message):
     if message.text.startswith("/"):
         return
 
-    censored, has_bad = censor_text(message.text)
-
-    if has_bad:
+    if has_bad_words(message.text):
         try:
             await message.delete()
+            logging.info(
+                f"Удалено сообщение от {message.from_user.id} "
+                f"в чате {message.chat.id}"
+            )
         except Exception as e:
             logging.warning(f"Не удалось удалить сообщение: {e}")
 
-        try:
-            warning = await message.answer(
-                f"⚠️ {message.from_user.mention_html()}, "
-                f"в этом чате запрещён мат и оскорбления!\n\n"
-                f"<b>Ваше сообщение:</b>\n<code>{censored}</code>"
-            )
-            await asyncio.sleep(10)
-            try:
-                await warning.delete()
-            except Exception:
-                pass
-        except Exception as e:
-            logging.warning(f"Не удалось отправить предупреждение: {e}")
 
-# ==================== РЕГИСТРАЦИЯ КОМАНД В МЕНЮ ====================
+# ==================== РЕГИСТРАЦИЯ КОМАНД ====================
 
 async def set_commands():
-    """Регистрирует команды — тогда в группе при вводе '/' появится меню."""
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
-        types.BotCommand(command="help", description="Справка"),
+        types.BotCommand(command="помощь", description="Список всех команд"),
+        types.BotCommand(command="кнб", description="Камень-ножницы-бумага"),
+        types.BotCommand(command="кубик", description="Бросить кубик"),
+        types.BotCommand(command="монетка", description="Орёл или решка"),
+        types.BotCommand(command="титул", description="Выдать смешной титул"),
+        types.BotCommand(command="шар", description="Магический шар"),
+        types.BotCommand(command="кик", description="Кикнуть участника"),
+        types.BotCommand(command="бан", description="Забанить участника"),
+        types.BotCommand(command="врембан", description="Временный бан"),
+        types.BotCommand(command="мут", description="Замутить участника"),
+        types.BotCommand(command="размут", description="Размутить участника"),
     ]
     await bot.set_my_commands(commands)
+
 
 # ==================== ЗАПУСК ====================
 
