@@ -44,29 +44,28 @@ NOT_LETTERS = re.compile(r"[^а-я]")
 
 
 def normalize(text: str) -> str:
-    """Lower, гомоглифы→рус, только буквы, сжимаем все повторы."""
     if not text:
         return ""
     text = text.lower()
     text = text.replace("ё", "е")
     text = text.translate(HOMOGLYPHS)
     text = NOT_LETTERS.sub("", text)
-    text = re.sub(r"(.)\1+", r"\1", text)
     return text
 
 
-# ==================== МАТ-КОРНИ ====================
+# ==================== МАТ ====================
 
-MAT_ROOTS = [
+# Всё подстрокой. Никаких regex alternation, никаких порядков.
+BAD_SUBSTRINGS = [
+    # бля — самый проблемный
+    "бля",
     # хуй
-    "хуй", "хуя", "хую", "хуе", "хуи", "хул",
+    "хуй", "хуя", "хую", "хуе", "хуи",
     "хуесос", "хуеплет", "хуеглот", "хуемраз",
     # хер
     "хер",
     # пизд
     "пизд", "пизж",
-    # бля
-    "бляд", "блят", "бля",
     # еб
     "еб", "ебан", "ебал", "ебат", "ебу", "еби", "ебло",
     "заеб", "наеб", "отъеб", "подъеб", "уеб", "въеб",
@@ -148,19 +147,9 @@ MAT_ROOTS = [
     "изнасил", "изнасилую", "изнасиловать",
 ]
 
-_seen = set()
-MAT_ROOTS_UNIQ = []
-for r in MAT_ROOTS:
-    if r not in _seen:
-        _seen.add(r)
-        MAT_ROOTS_UNIQ.append(r)
+BAD_SUBSTRINGS = list(dict.fromkeys(BAD_SUBSTRINGS))
 
-# Сортируем от длинных к коротким — важно для корректного re.search
-MAT_ROOTS_UNIQ.sort(key=len, reverse=True)
-
-MAT_PATTERN = re.compile("|".join(re.escape(r) for r in MAT_ROOTS_UNIQ))
-
-# Whitelist — точные слова, которые не мат
+# Whitelist — точные слова (нормализованные), которые НЕ мат
 WHITELIST_RAW = {
     "херсон", "херсонес", "херсонский",
     "мандарин", "мандарины", "мандаринка", "мандариновый", "мандаринчик",
@@ -187,21 +176,28 @@ WHITELIST_RAW = {
     "хамство", "хамства",
     "поганец",
 }
-
 WHITELIST = {normalize(w) for w in WHITELIST_RAW}
 
 
 def has_bad_words(text: str) -> bool:
     """
-    Проверка мата:
-    1) по словам — каждое нормализуем, ищем мат-корень
-    2) по склеенному тексту — ловим 'б л я т ь'
-    Whitelist исключается на всех уровнях.
+    Простая надёжная проверка:
+    - нормализуем текст
+    - если хоть одна подстрока из BAD_SUBSTRINGS есть в нормализованном тексте → мат
+    - исключение: если всё сообщение = одно whitelist-слово
     """
     if not text:
         return False
 
-    # 1) по словам
+    flat = normalize(text)
+    if not flat:
+        return False
+
+    # если всё сообщение — whitelist-слово целиком
+    if flat in WHITELIST:
+        return False
+
+    # проверяем КАЖДОЕ слово отдельно — чтобы "херсон" не блокировался из-за "хер"
     words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
     for w in words:
         wn = normalize(w)
@@ -209,13 +205,13 @@ def has_bad_words(text: str) -> bool:
             continue
         if wn in WHITELIST:
             continue
-        if MAT_PATTERN.search(wn):
-            return True
+        for bad in BAD_SUBSTRINGS:
+            if bad in wn:
+                return True
 
-    # 2) склеенный текст
-    flat = normalize(text)
-    if flat and flat not in WHITELIST:
-        if MAT_PATTERN.search(flat):
+    # и общий склеенный текст — для обходов типа "б л я т ь"
+    for bad in BAD_SUBSTRINGS:
+        if bad in flat:
             return True
 
     return False
@@ -468,6 +464,7 @@ async def cmd_start(message: types.Message):
         "👋 Привет! Я бот-цензор.\n\n"
         "🛡 Удаляю мат автоматически\n"
         "🧹 Чищу сервисные сообщения\n"
+        "📢 Созываю всех через /everyone\n"
         "🎲 Развлекательные команды\n"
         "🔨 Модерация\n\n"
         "📌 /help для списка команд."
@@ -484,6 +481,8 @@ async def cmd_help(message: types.Message):
         "/dice — кубик\n"
         "/coin — орёл/решка\n"
         "/ball &lt;вопрос&gt; — магический шар\n\n"
+        "<b>📢 Общее:</b>\n"
+        "/everyone — созвать всех (упомянуть)\n\n"
         "<b>🔨 Модерация (для админов):</b>\n"
         "/delete — удалить сообщение (reply)\n"
         "/kick — кикнуть (@user или reply)\n"
@@ -573,6 +572,74 @@ async def cmd_service_status(message: types.Message):
     emoji = "✅" if status else "🔓"
     state = "включена" if status else "выключена"
     await message.answer(f"{emoji} Чистка сервисных <b>{state}</b>.")
+
+
+# ==================== /everyone ====================
+
+@dp.message(Command("everyone"))
+@dp.message(Command("все"))
+async def cmd_everyone(message: types.Message):
+    """Созывает всех участников чата, упоминая их."""
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("❌ Команда работает только в группах.")
+        return
+
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут созывать всех.")
+        return
+
+    chat_id = message.chat.id
+    user_ids = set()
+
+    # 1) Все, кого бот видел в этом чате (кэш username → user_id)
+    cached = USERNAME_CACHE.get(chat_id, {})
+    for uid in cached.values():
+        user_ids.add(uid)
+
+    # 2) Админы чата — их можно получить списком
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if not admin.user.is_bot:
+                user_ids.add(admin.user.id)
+    except Exception as e:
+        logging.warning(f"get_chat_administrators: {e}")
+
+    # 3) Автор команды
+    user_ids.add(message.from_user.id)
+
+    # убираем ботов
+    real_ids = []
+    for uid in user_ids:
+        try:
+            member = await bot.get_chat_member(chat_id, uid)
+            if member.user.is_bot:
+                continue
+            if member.status in ("left", "kicked"):
+                continue
+            real_ids.append(uid)
+        except Exception:
+            continue
+
+    if not real_ids:
+        await message.answer("⚠️ Не удалось собрать участников. Пока никого не видел в чате.")
+        return
+
+    # Telegram позволяет упоминать через <a href="tg://user?id=...">Name</a>
+    mentions = []
+    for uid in real_ids[:40]:  # ограничим 40, чтобы не превысить лимит 4096 символов
+        mentions.append(f'<a href="tg://user?id={uid}">​</a>')
+
+    text = (
+        "📢 <b>Внимание всем!</b>\n\n"
+        + " ".join(mentions)
+        + f"\n\n{message.from_user.mention_html()} созывает всех!"
+    )
+
+    try:
+        await message.answer(text)
+    except Exception as e:
+        await message.reply(f"❌ Не удалось созвать: {e}")
 
 
 # ==================== /delete ====================
@@ -1046,13 +1113,11 @@ async def on_chat_changes(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    # Кэшируем авторов
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
         cache_user(message.chat.id, message.reply_to_message.from_user)
 
-    # Сервисные по тексту
     if service_cleaner_enabled(message.chat.id) and is_service_message(message):
         try:
             await message.delete()
@@ -1085,6 +1150,7 @@ async def set_commands():
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
         types.BotCommand(command="help", description="Все команды бота"),
+        types.BotCommand(command="everyone", description="Созвать всех"),
         types.BotCommand(command="rps", description="КНБ с ботом или @user"),
         types.BotCommand(command="dice", description="Бросить кубик"),
         types.BotCommand(command="coin", description="Орёл или решка"),
