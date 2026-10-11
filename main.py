@@ -26,14 +26,14 @@ dp = Dispatcher()
 
 TEMP_BANS = {}
 TEMP_MUTES = {}
-RPS_GAMES = {}       # {game_id: {...,"pending": bool}}
-RPS_INVITES = {}     # {invite_id: {chat_id, from_id, to_id, message_id}}
+RPS_GAMES = {}
+RPS_INVITES = {}
 CENSOR_ENABLED = {}
 USERNAME_CACHE = {}
-USER_ID_TO_NAME = {}  # {(chat_id, user_id): display_name}
+USER_ID_TO_NAME = {}
 SERVICE_CLEANER_ENABLED = {}
 
-BOT_ID = None  # узнаем при старте
+BOT_ID = None
 
 # ==================== НОРМАЛИЗАЦИЯ ====================
 
@@ -59,9 +59,11 @@ def normalize(text: str) -> str:
 
 # ==================== МАТ ====================
 
-# Длинные корни (≥5 букв) — ищем подстрокой, ложных срабатываний почти нет
+# Только реальные матерные корни. Без общеупотребительных слов.
 LONG_BAD = [
+    # хуй
     "хуесос", "хуеплет", "хуеглот", "хуемраз",
+    # пизд
     "пизда", "пизде", "пизду", "пизды", "пиздо",
     "пиздец", "пиздану", "пиздато", "пиздатый",
     "пиздюк", "пиздюл", "пиздюх",
@@ -70,6 +72,7 @@ LONG_BAD = [
     "пиздюлина", "пиздюлей", "пиздюли",
     "распизд", "запизд", "впизд", "спизд", "испизд",
     "напизд", "пропизд", "припизд", "допизд",
+    # бля
     "блядина", "блядинк", "блядищ",
     "блядство", "блядств", "блядск", "блядская",
     "блядун", "блядуш",
@@ -77,6 +80,7 @@ LONG_BAD = [
     "забляд", "набляд", "пробляд",
     "выбляд", "выблядок",
     "добляд", "прибляд",
+    # еб
     "ебан", "ебану", "ебанут", "ебанул",
     "ебат", "ебать", "ебал",
     "ебало", "ебальник",
@@ -104,26 +108,31 @@ LONG_BAD = [
     "перееб", "переебал", "переебать", "переебан", "переебу",
     "поебал", "поебать", "поебен", "поебень", "поебон",
     "поебушка", "поебух", "ебалда",
+    # сук
     "сучка", "сучки", "сучонок",
     "сучара", "сучарк", "сучий", "сучья",
-    "паскуд", "паскудник",
-    "падлюк", "падлюка", "падлючк",
+    # муд
     "мудак", "мудачь",
     "мудил", "мудила", "мудило",
     "мудозвон",
     "мудень", "мудня",
     "замуд", "намуд", "промуда",
-    "гандон", "гондон",
-    "кондом",
+    # пидор
     "пидор", "пидар", "пидер",
     "педик", "педер", "педераст",
     "пидорас", "пидарас", "пидорасина",
     "пидорств", "пидарств",
     "пидорок",
+    # гандон
+    "гандон", "гондон",
+    "кондом",
+    # прочее
+    "паскуд", "паскудник",
+    "падлюк", "падлюка", "падлючк",
     "гомик", "гомосек",
-    "залуп", "залупа", "залупе", "залупу",
     "залупка", "залупок",
     "мандавошк", "мандав", "мандуй",
+    # шлюх
     "шлюха", "шлюхи", "шлюхо", "шлюхе", "шлюху",
     "шлюшка", "шлюшки", "шлюшк", "шлюшонок", "шлюшня",
     "пошлюх",
@@ -131,10 +140,8 @@ LONG_BAD = [
     "шалава", "шалавы", "шалавищ",
     "потаскух", "потаскушк",
     "хабалка", "хабалк",
-    "стерва", "стервы", "стерво",
-    "блудниц",
+    # остальное
     "влагалищ",
-    "клитор",
     "спермат", "сперматозо", "сперматозоид",
     "мошонк", "мошонка",
     "срака", "сраку", "сраки",
@@ -143,7 +150,6 @@ LONG_BAD = [
     "ссать", "ссала", "ссанин",
     "пердеж", "пердану", "пердун", "пердунь",
     "бздеж", "бздун",
-    "какашк",
     "говно", "говна", "говне", "говну",
     "говнюк", "говнюшк",
     "говня", "говнян", "говняст",
@@ -156,7 +162,6 @@ LONG_BAD = [
     "жопан", "жопень",
     "задниц", "задница", "задницу",
     "анальн",
-    "анусн",
     "простат", "простата",
     "дрочи", "дрочил", "дрочить", "дрочер",
     "онанизм", "онанист",
@@ -164,14 +169,11 @@ LONG_BAD = [
     "минет", "миньет", "минетч",
     "кунилингус", "кунилинг",
     "фелляц",
-    "оральн",
     "сексуаль", "сексуальн",
     "половойакт",
     "совокуп", "совокуплен",
-    "сношен", "сношение",
     "трахат", "трахаю", "трахал", "трахать", "трахнул",
     "шмара", "шмары",
-    "подзаборн",
     "дешевка",
     "хохол", "хохлы", "хохлушк",
     "москаль", "москаля",
@@ -240,76 +242,99 @@ LONG_BAD = [
     "олигофрен",
     "дауненок",
     "аутист",
-    "прикончить",
-    "уничтож",
-    "расправ",
-    "размажу",
-    "раздавлю",
     "изнасил", "изнасилую", "изнасиловать",
 ]
 
-# Короткие корни (≤4 буквы) — только как ОТДЕЛЬНЫЕ слова
+# Короткие корни — только как отдельные слова
 SHORT_BAD = [
+    # хуй
     "хуй", "хуя", "хую", "хуе", "хуи", "хуйн",
     "хуйло", "хуйня", "хуец", "хуищ", "хуяч", "хуяр",
     "хуел", "хуею", "хуев",
     "схуя", "схуй",
+    # хер
     "хер",
+    # пизд
     "пизд", "пизж",
+    # бля — все формы
     "блядь", "бляди", "блядо", "бляде", "бляду",
-    "блят", "бляд", "бля",
+    "блять", "блят", "бляд", "бля",
+    # еб
     "еб", "ебу", "еби",
+    # сука
     "сука", "суки", "суке", "суку", "сукой", "сучар", "сучк",
     "суч", "засук",
+    # муд
     "мудор",
+    # гандон
     "ганд",
+    # пидор
     "пидр",
+    # гомо
     "гомо",
+    # манда
     "манда", "манде", "манду", "манды", "мандо",
+    # шлюх
     "шлюх", "шлюш",
+    "шлюха", "шлюхи", "шлюхе", "шлюху", "шлюхой",
+    # шалав, потаск, хабал
     "шалав", "потаск", "хабал", "стерв",
     "курв", "курва", "курвы", "курво",
+    # блуд
     "блуд",
+    # вагин, сперм
     "вагин", "вагина",
     "сперм", "сперма",
+    # яичк
     "яичк",
+    # срак, срал, срач
     "срак",
     "сру", "срал",
     "срач", "срачь",
+    # сса
     "ссат", "ссал", "ссан", "ссани",
     "ссик", "ссику",
+    # перд, бзд
     "перд", "пердну", "бзд",
+    # вонюч
     "вонюч",
+    # моча
     "моча", "мочит", "мочен",
+    # жоп
     "жоп",
+    # анал
     "анал",
+    # анус
     "анус",
+    # дроч
     "дроч",
+    # онан
     "онан",
+    # фелл
     "фелл",
+    # орал
     "орал",
+    # секс
     "секс", "секса", "сексу", "сексе",
-    "полов",
+    # снош
     "снош",
+    # трах
     "трах", "трахн",
+    # шмар
     "шмар",
-    "дешевк",
-    "кацап",
-    "жид",
+    # нации
+    "кацап", "жид",
     "чурка", "чурки", "чурк",
     "хач", "хачи",
-    "азерб",
-    "узбек",
-    "немч",
-    "наци",
-    "нарк", "нарко",
-    "торч",
-    "убит", "убить",
-    "бомб", "бомба",
-    "игил",
+    "азерб", "узбек", "немч", "наци",
+    # наркота
+    "нарк", "нарко", "торч",
+    # оружие/тема
+    "бомб", "бомба", "игил",
+    # педо
     "педо",
-    "мраз",
-    "твар",
+    # оскорбления короткие
+    "мраз", "твар",
     "урод", "уроды", "уродина",
     "дрян", "дрянь", "дрянн",
     "подлец",
@@ -317,31 +342,28 @@ SHORT_BAD = [
     "хам", "хамл", "хамск",
     "наглец", "нагл",
     "нахал", "наха",
+    # залупа
+    "залупа", "залупе", "залупу", "залупы", "залупой",
+    # угрозы (только явные)
     "убью",
     "порву", "порвать",
     "сожгу", "сжечь",
-    "казн", "казню", "казнить",
-    "размаж",
-    "сломаю", "сломать",
-    "изобью", "избить",
 ]
 
-# Whitelist — точные нормализованные слова, которые НЕ мат.
-# Расширен специально, чтобы не ловить обычные слова с опасными корнями.
+# Whitelist — обычные слова, которые могут содержать "опасные" корни.
 WHITELIST_RAW = {
     # херсон / хер
     "херсон", "херсонес", "херсонский", "херсонская", "херсонский",
-    "хер", "херов", "херня", "херня", "херню", "херней",
-    # мандарин / манда
+    # мандарин
     "мандарин", "мандарины", "мандаринка", "мандаринка",
     "мандариновый", "мандаринчик", "мандаринчики",
-    # анализ / анал
+    # анализ
     "анализ", "анализа", "анализу", "анализом", "анализе",
     "аналитик", "аналитика", "аналитики", "аналитику",
     "анализировать", "анализировал", "анализирую",
     "аналог", "аналога", "аналогия", "аналогичный", "аналогично",
-    "аналоговый", "аналоговый",
-    # трахея / трах
+    "аналоговый",
+    # трахея
     "трахея", "трахеи", "трахею", "трахеей", "трахеит",
     "трахеотомия", "трахеостомия",
     # секс / секстант
@@ -349,34 +371,33 @@ WHITELIST_RAW = {
     "секция", "секции", "секцию", "секций", "секционный",
     "секрет", "секрета", "секретный", "секретно",
     "секретарь", "секретариат",
-    # сук / сукаленок
+    # сук
     "сукаленок", "сукаленка",
     "сукно", "сукна", "сукном", "сукне",
     "суккулент", "суккуленты",
     "сукровица",
-    # срак / сракозябра
+    # сракозябра
     "сракозябра", "сракозябры",
-    # полов / половой
+    # полов
     "половой", "половая", "половое", "половые", "половых",
     "половинка", "половина", "половину", "половины",
     "половник", "половники",
-    # орал / оральный
+    # орал
     "оральный", "оральная", "оральное", "оральные",
-    "орал", "орала", "орали", "орать", "орал",  # редко, но лучше пропустить
-    # снош / сношение
+    "орал", "орала", "орали", "орать",
+    # снош
     "сношение", "сношения", "сношению", "сношением",
     "сносно", "сносный", "сносная", "сносное", "сносные",
     "сноска", "сноски", "сноску",
-    # дешевк / дешевка
+    # дешевк
     "дешевка", "дешевки", "дешевке", "дешевку", "дешевкой",
     "дешевле", "дешевый", "дешевая", "дешево",
     # соль
-    "соль", "соли", "солью", "солью",
+    "соль", "соли", "солью",
     "соленый", "соленая", "соленое",
     "солнечный", "солнечная", "солнце",
-    # анус / анальный
+    # анальный
     "анальный", "анальная", "анальное", "анальные",
-    "анус", "ануса", "анусу", "анусом",
     # вагина / клитор
     "вагина", "вагины", "вагине", "вагину", "вагиной",
     "вагинальный", "вагинальная",
@@ -386,7 +407,7 @@ WHITELIST_RAW = {
     "фаллос", "фаллоса", "фаллосу", "фаллосом",
     "пенис", "пениса", "пенису", "пенисом",
     "пенистый", "пенистая",
-    # секс / сексуальность
+    # секс
     "сексуальный", "сексуальная", "сексуальное", "сексуальные",
     "сексуальность", "сексуально",
     # мастурбация
@@ -399,24 +420,20 @@ WHITELIST_RAW = {
     # поганец
     "поганец", "поганка", "поганки",
     "поганый", "поганая", "поганое", "поганые",
-    # трава / трах
+    # трава
     "трава", "травы", "траве", "траву", "травой", "травам", "травах",
     "травинка", "травинки", "травинку",
     "травля", "травли", "травлю",
     "травма", "травмы", "травме", "травму", "травмой",
     "травматолог", "травматология",
     "траверс", "траверса",
-    "травильный", "травильная",
-    # лупа / луп
+    # лупа
     "лупа", "лупы", "лупе", "лупу", "лупой",
     "лупить", "луплю", "лупит",
-    # муравей / мурав
+    # муравей
     "муравей", "муравья", "муравью", "муравьи", "муравьёв", "муравьев",
     "муравьиный", "муравьиная", "муравейник", "муравейника",
-    # сука — оставим но с whitelist форм
-    "сука", "суки", "суке", "суку", "сукой", "сукою",  # добавляем формы
-    # прочие не-матерные
-    "сукно", "сукна",
+    # суккулент
     "суккулент", "суккуленты", "суккулентный",
 }
 
@@ -426,39 +443,62 @@ WHITELIST = {normalize(w) for w in WHITELIST_RAW}
 def has_bad_words(text: str) -> bool:
     """
     Логика:
-    1. Если текст — точное whitelist-слово → не мат
-    2. Длинные корни — подстрокой в тексте
-    3. Короткие корни — как отдельные слова
-    4. Склеенный текст — для обходов
+    1. Разбиваем текст на слова. Каждое нормализуем.
+    2. Длинные корни — подстрокой в слове.
+    3. Короткие корни — точное совпадение со словом.
+    4. Обход "б л я т ь" (все слова ≤2 букв) — склеиваем и ищем.
+    5. Обход "б-л-я-т-ь" (без пробелов) — склеиваем и ищем.
     """
     if not text:
         return False
 
     raw_words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
-    norm_words = [normalize(w) for w in raw_words]
-    norm_words = [w for w in norm_words if w]
-    flat = normalize(text)
+    norm_words = [normalize(w) for w in raw_words if normalize(w)]
 
-    if flat in WHITELIST:
+    if not norm_words:
         return False
 
-    # Длинные — подстрокой в тексте
-    for bad in LONG_BAD:
-        if bad in flat:
+    # Если весь текст — одно whitelist-слово → не мат
+    if len(norm_words) == 1 and norm_words[0] in WHITELIST:
+        return False
+
+    # 1) длинные корни — подстрокой
+    for w in norm_words:
+        if w in WHITELIST:
+            continue
+        for bad in LONG_BAD:
+            if bad in w:
+                return True
+
+    # 2) короткие — точное совпадение со словом
+    for w in norm_words:
+        if w in WHITELIST:
+            continue
+        if w in SHORT_BAD:
             return True
 
-    # Короткие — как отдельные слова
-    norm_set = set(norm_words)
-    for bad in SHORT_BAD:
-        if bad in norm_set:
-            return True
+    # 3) обход "б л я т ь" — все слова короткие
+    all_short = all(len(w) <= 2 for w in norm_words)
+    if all_short and len(norm_words) >= 2:
+        flat = normalize(text)
+        if flat and flat not in WHITELIST:
+            for bad in SHORT_BAD:
+                if len(bad) >= 3 and bad in flat:
+                    return True
+            for bad in LONG_BAD:
+                if bad in flat:
+                    return True
 
-    # Склеенный — для обходов "б л я т ь"
-    for bad in SHORT_BAD:
-        if len(bad) >= 3 and bad in flat:
-            if all(w in WHITELIST for w in norm_words):
-                continue
-            return True
+    # 4) обход "б-л-я-т-ь" — без пробелов вообще
+    if " " not in text.strip():
+        flat = normalize(text)
+        if flat and flat not in WHITELIST:
+            for bad in SHORT_BAD:
+                if len(bad) >= 3 and bad in flat:
+                    return True
+            for bad in LONG_BAD:
+                if bad in flat:
+                    return True
 
     return False
 
@@ -526,7 +566,6 @@ def is_service_message(message: types.Message) -> bool:
 # ==================== КЭШ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 def cache_user(chat_id: int, user: types.User):
-    """Запоминает username и display_name для чата."""
     if not user:
         return
     if user.username:
@@ -535,7 +574,6 @@ def cache_user(chat_id: int, user: types.User):
 
 
 def resolve_username(chat_id: int, username: str):
-    """Ищет user_id по @username в кэше (без @)."""
     if not username:
         return None
     uname = username.lstrip("@").lower()
@@ -543,7 +581,6 @@ def resolve_username(chat_id: int, username: str):
 
 
 def get_name(chat_id: int, user_id: int) -> str:
-    """Возвращает display_name по user_id (или ID, если не знаем)."""
     return USER_ID_TO_NAME.get((chat_id, user_id), f"ID {user_id}")
 
 
@@ -562,10 +599,8 @@ def extract_user_id_from_text(text: str):
 
 
 async def resolve_target(message: types.Message):
-    """Возвращает (user_id, display_name, error)."""
     chat_id = message.chat.id
 
-    # 1) reply
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
         cache_user(chat_id, u)
@@ -573,7 +608,6 @@ async def resolve_target(message: types.Message):
 
     text = message.text or ""
 
-    # 2) entities: text_mention или mention
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
@@ -591,18 +625,15 @@ async def resolve_target(message: types.Message):
                     "Или используй reply / числовой ID."
                 )
 
-    # 3) @username в тексте
     username = extract_username_from_text(text)
     if username:
         uid = resolve_username(chat_id, username)
         if uid:
             return uid, get_name(chat_id, uid), None
         return None, username, (
-            f"❌ Не удалось найти <code>{username}</code> в кэше чата.\n"
-            "Пользователь должен хоть раз написать сообщение."
+            f"❌ Не удалось найти <code>{username}</code> в кэше чата."
         )
 
-    # 4) числовой ID
     uid = extract_user_id_from_text(text)
     if uid:
         return uid, f"ID {uid}", None
@@ -870,7 +901,7 @@ async def cmd_delete(message: types.Message):
         logging.warning(f"delete cmd: {e}")
 
 
-# ==================== КНБ с приглашением ====================
+# ==================== КНБ ====================
 
 RPS_CHOICES = {"rock": "✊ Камень", "scissors": "✌️ Ножницы", "paper": "✋ Бумага"}
 RPS_BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
@@ -912,23 +943,28 @@ async def cmd_rps(message: types.Message):
 
     cache_user(message.chat.id, message.from_user)
 
-    target_id, target_name, _ = await resolve_target_for_rps(message)
+    target_id, target_name = await resolve_target_for_rps(message)
 
     # Игра с ботом
     if target_id is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
         RPS_GAMES[game_id] = {
-            "player_a": message.from_user.id, "player_b": BOT_ID,
-            "choice_a": None, "choice_b": bot_choice_key,
+            "player_a": message.from_user.id,
+            "player_b": BOT_ID,
+            "choice_a": None,
+            "choice_b": bot_choice_key,
+            "turn": "a",
             "is_bot": True,
             "a_name": message.from_user.full_name,
             "a_mention": message.from_user.mention_html(),
-            "b_name": "🤖 Бот", "b_mention": "🤖 Бот",
+            "b_name": "🤖 Бот",
+            "b_mention": "🤖 Бот",
             "chat_id": message.chat.id,
         }
         await message.answer(
-            f"🎮 <b>КНБ с ботом</b>\n\n👤 {message.from_user.mention_html()}, твой ход:",
+            f"🎮 <b>КНБ с ботом</b>\n\n"
+            f"👤 {message.from_user.mention_html()}, твой ход:",
             reply_markup=rps_keyboard(game_id)
         )
         return
@@ -965,38 +1001,35 @@ async def cmd_rps(message: types.Message):
 
 
 async def resolve_target_for_rps(message: types.Message):
-    """Отдельная логика — принимает reply, @username (из entities) или @username из кэша."""
     chat_id = message.chat.id
 
-    # reply
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
         cache_user(chat_id, u)
-        return u.id, u.full_name, None
+        return u.id, u.full_name
 
     text = message.text or ""
 
-    # entity mention / text_mention
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
                 u = entity.user
                 cache_user(chat_id, u)
-                return u.id, u.full_name, None
+                return u.id, u.full_name
             if entity.type == "mention":
                 username = text[entity.offset:entity.offset + entity.length]
                 uid = resolve_username(chat_id, username)
                 if uid:
-                    return uid, get_name(chat_id, uid), None
-                return None, None, None
+                    return uid, get_name(chat_id, uid)
+                return None, None
 
     username = extract_username_from_text(text)
     if username:
         uid = resolve_username(chat_id, username)
         if uid:
-            return uid, get_name(chat_id, uid), None
+            return uid, get_name(chat_id, uid)
 
-    return None, None, None
+    return None, None
 
 
 @dp.callback_query()
@@ -1013,7 +1046,6 @@ async def rps_callback(call: CallbackQuery):
             await call.answer("Приглашение не найдено.", show_alert=True)
             return
 
-        # отвечать может только приглашённый
         if call.from_user.id != invite["to_id"]:
             await call.answer("Это приглашение не тебе.", show_alert=True)
             return
@@ -1031,7 +1063,6 @@ async def rps_callback(call: CallbackQuery):
             RPS_INVITES.pop(invite_id, None)
             return
 
-        # accept
         await call.answer("Принято!")
         game_id = make_game_id(invite["chat_id"], invite["from_id"])
         RPS_GAMES[game_id] = {
@@ -1039,6 +1070,7 @@ async def rps_callback(call: CallbackQuery):
             "player_b": invite["to_id"],
             "choice_a": None,
             "choice_b": None,
+            "turn": "a",
             "is_bot": False,
             "a_name": invite["from_name"],
             "a_mention": invite["from_mention"],
@@ -1103,6 +1135,11 @@ async def rps_callback(call: CallbackQuery):
             await call.answer("Не участник.", show_alert=True)
             return
 
+        # Проверка хода
+        if game["turn"] != slot:
+            await call.answer("Сейчас не твой ход!", show_alert=True)
+            return
+
         if game.get(f"choice_{slot}") is not None:
             await call.answer("Уже выбрал!", show_alert=True)
             return
@@ -1131,12 +1168,18 @@ async def rps_callback(call: CallbackQuery):
             RPS_GAMES.pop(game_id, None)
             return
 
-        next_name = game["b_mention"] if game["choice_a"] is not None else game["a_mention"]
+        if slot == "a":
+            game["turn"] = "b"
+            next_mention = game["b_mention"]
+        else:
+            game["turn"] = "a"
+            next_mention = game["a_mention"]
+
         try:
             await call.message.edit_text(
                 f"🎮 <b>КНБ</b>\n\n"
                 f"🥊 {game['a_mention']} vs {game['b_mention']}\n\n"
-                f"👉 Ход: {next_name}",
+                f"👉 Теперь ход: {next_mention}",
                 reply_markup=rps_keyboard(game_id)
             )
         except Exception:
@@ -1329,13 +1372,11 @@ async def cmd_unmute(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    # Кэширование
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
         cache_user(message.chat.id, message.reply_to_message.from_user)
 
-    # Сервисные — удаляем
     if SERVICE_CLEANER_ENABLED.get(message.chat.id, True) and is_service_message(message):
         try:
             await message.delete()
@@ -1343,7 +1384,6 @@ async def filter_messages(message: types.Message):
             logging.warning(f"Не удалил сервисное: {e}")
         return
 
-    # Мат
     if not message.text:
         return
     if message.text.startswith("/"):
