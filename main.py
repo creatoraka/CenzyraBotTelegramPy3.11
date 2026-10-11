@@ -32,26 +32,19 @@ TEMP_BANS = {}
 TEMP_MUTES = {}
 RPS_GAMES = {}
 CENSOR_ENABLED = {}
-
-# Кэш пользователей: {chat_id: {username_lower: user_id}}
-# и обратный: {(chat_id, user_id): username_lower}
 USERNAME_CACHE = {}
+# Хранилище статуса автоудаления сервисных сообщений: {chat_id: True/False}
+SERVICE_CLEANER_ENABLED = {}
 
 # ==================== НОРМАЛИЗАЦИЯ ====================
 
 HOMOGLYPHS = str.maketrans({
-    "a": "а", "A": "а",
-    "e": "е", "E": "е",
-    "o": "о", "O": "о",
-    "p": "р", "P": "р",
-    "c": "с", "C": "с",
-    "x": "х", "X": "х",
-    "y": "у", "Y": "у",
-    "k": "к", "K": "к",
-    "m": "м", "M": "м",
-    "t": "т", "T": "т",
-    "h": "н", "H": "н",
-    "b": "в", "B": "в",
+    "a": "а", "A": "а", "e": "е", "E": "е",
+    "o": "о", "O": "о", "p": "р", "P": "р",
+    "c": "с", "C": "с", "x": "х", "X": "х",
+    "y": "у", "Y": "у", "k": "к", "K": "к",
+    "m": "м", "M": "м", "t": "т", "T": "т",
+    "h": "н", "H": "н", "b": "в", "B": "в",
     "n": "п", "N": "п",
     "0": "о", "1": "и", "3": "з", "4": "а",
     "6": "б", "8": "в", "9": "д",
@@ -80,7 +73,7 @@ def normalize_flat(text: str) -> str:
     return text
 
 
-# ==================== СПИСКИ ====================
+# ==================== СПИСКИ МАТА ====================
 
 MAT_ROOTS_LONG = [
     r"хуйло", r"хуйня", r"хуесос", r"хуисос", r"хуеплёт", r"хуеплет",
@@ -526,17 +519,107 @@ def has_bad_words(text: str) -> bool:
     return False
 
 
+# ==================== СЕРВИСНЫЕ СООБЩЕНИЯ ====================
+
+# Паттерны сервисных сообщений на разных языках
+# (для клиентов, которые присылают их как text, а не как new_chat_members)
+SERVICE_PATTERNS = [
+    # X пригласил Y / X invited Y
+    re.compile(r".+\s+пригласил[а]?\s+.+", re.IGNORECASE),
+    re.compile(r".+\s+invited\s+.+", re.IGNORECASE),
+    # X добавил Y / X added Y
+    re.compile(r".+\s+добавил[а]?\s+.+", re.IGNORECASE),
+    re.compile(r".+\s+added\s+.+", re.IGNORECASE),
+    # X вступил / X присоединился / X joined
+    re.compile(r".+\s+вступил[а]?\s+(в|к)\s+", re.IGNORECASE),
+    re.compile(r".+\s+присоединил(ся|ась)\s+", re.IGNORECASE),
+    re.compile(r".+\s+joined\s+(the\s+)?group", re.IGNORECASE),
+    # X вышел / X покинул / X left
+    re.compile(r".+\s+вышел\s+из\s+", re.IGNORECASE),
+    re.compile(r".+\s+вышла\s+из\s+", re.IGNORECASE),
+    re.compile(r".+\s+покинул[а]?\s+", re.IGNORECASE),
+    re.compile(r".+\s+left\s+(the\s+)?group", re.IGNORECASE),
+    # X удалил Y / X removed Y
+    re.compile(r".+\s+удалил[а]?\s+.+", re.IGNORECASE),
+    re.compile(r".+\s+removed\s+.+", re.IGNORECASE),
+    # X изменил(а) название группы
+    re.compile(r".+\s+изменил[а]?\s+название", re.IGNORECASE),
+    # Закреплённое сообщение / Pinned message
+    re.compile(r"^(закрепл[её]нн?[оы][ем]?\s+сообщение|pinned\s+message)", re.IGNORECASE),
+]
+
+
+def is_service_message(message: types.Message) -> bool:
+    """Проверяет, является ли сообщение сервисным о входе/выходе."""
+    # 1) Системные поля Telegram — самый надёжный способ
+    if message.new_chat_members:
+        return True
+    if message.left_chat_member:
+        return True
+    if getattr(message, "new_chat_title", None):
+        return True
+    if getattr(message, "new_chat_photo", None):
+        return True
+    if getattr(message, "delete_chat_photo", None):
+        return True
+    if getattr(message, "pinned_message", None):
+        return True
+    if getattr(message, "group_chat_created", None):
+        return True
+    if getattr(message, "supergroup_chat_created", None):
+        return True
+    if getattr(message, "channel_chat_created", None):
+        return True
+    if getattr(message, "migrate_to_chat_id", None):
+        return True
+    if getattr(message, "migrate_from_chat_id", None):
+        return True
+    if getattr(message, "video_chat_started", None):
+        return True
+    if getattr(message, "video_chat_ended", None):
+        return True
+    if getattr(message, "video_chat_scheduled", None):
+        return True
+    if getattr(message, "video_chat_participants_invited", None):
+        return True
+    if getattr(message, "proximity_alert_triggered", None):
+        return True
+    if getattr(message, "forum_topic_created", None):
+        return True
+    if getattr(message, "forum_topic_closed", None):
+        return True
+    if getattr(message, "forum_topic_reopened", None):
+        return True
+
+    # 2) Текстовые паттерны — на случай, если Telegram прислал как обычный текст
+    # (бывает в некоторых клиентах или при пересылке сервисных сообщений)
+    text = message.text or message.caption or ""
+    if text:
+        # короткие сообщения (<= 200 символов) с упоминанием @username + глагола
+        if len(text) <= 200:
+            for pattern in SERVICE_PATTERNS:
+                if pattern.search(text):
+                    # дополнительная проверка: должен быть @username или имя в начале
+                    if "@" in text or text[0].isupper():
+                        return True
+
+    return False
+
+
+def service_cleaner_enabled(chat_id: int) -> bool:
+    """По умолчанию автоудаление сервисных сообщений включено."""
+    return SERVICE_CLEANER_ENABLED.get(chat_id, True)
+
+
 # ==================== КЭШ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 def cache_user(chat_id: int, user: types.User):
-    """Запоминает username ↔ user_id для резолва по @username."""
     if not user or not user.username:
         return
     USERNAME_CACHE.setdefault(chat_id, {})[user.username.lower()] = user.id
 
 
 def resolve_username(chat_id: int, username: str) -> int | None:
-    """Ищет user_id по @username в кэше чата."""
     if not username:
         return None
     uname = username.lstrip("@").lower()
@@ -544,7 +627,6 @@ def resolve_username(chat_id: int, username: str) -> int | None:
 
 
 def extract_username_from_text(text: str) -> str | None:
-    """Ищет @username в тексте."""
     if not text:
         return None
     m = re.search(r"@([A-Za-z0-9_]{4,32})", text)
@@ -552,7 +634,6 @@ def extract_username_from_text(text: str) -> str | None:
 
 
 def extract_user_id_from_text(text: str) -> int | None:
-    """Ищет числовой ID в тексте (для /unban 123456789)."""
     if not text:
         return None
     m = re.search(r"\b(\d{6,15})\b", text)
@@ -562,15 +643,6 @@ def extract_user_id_from_text(text: str) -> int | None:
 # ==================== ЦЕЛЬ КОМАНДЫ ====================
 
 async def resolve_target(message: types.Message):
-    """
-    Возвращает (user_id, display_name, error_message).
-    Порядок:
-    1) reply
-    2) text_mention / mention (@username с entity) — если user_id есть, вернём его
-    3) @username в тексте — ищем в кэше
-    4) числовой ID в тексте
-    """
-    # 1) reply
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
         cache_user(message.chat.id, u)
@@ -578,7 +650,6 @@ async def resolve_target(message: types.Message):
 
     text = message.text or ""
 
-    # 2) entities
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
@@ -587,7 +658,6 @@ async def resolve_target(message: types.Message):
                 return u.id, u.full_name, None
             if entity.type == "mention":
                 username = text[entity.offset:entity.offset + entity.length]
-                # пробуем найти в кэше
                 uid = resolve_username(message.chat.id, username)
                 if uid:
                     return uid, username, None
@@ -597,7 +667,6 @@ async def resolve_target(message: types.Message):
                     "Используй reply или укажи числовой ID."
                 )
 
-    # 3) @username в тексте
     username = extract_username_from_text(text)
     if username:
         uid = resolve_username(message.chat.id, username)
@@ -608,7 +677,6 @@ async def resolve_target(message: types.Message):
             "Пользователь должен хоть раз написать сообщение."
         )
 
-    # 4) числовой ID
     uid = extract_user_id_from_text(text)
     if uid:
         return uid, f"ID {uid}", None
@@ -622,14 +690,10 @@ async def resolve_target(message: types.Message):
 
 
 def extract_target_user(message: types.Message):
-    """
-    Старая синхронная функция для КНБ и титулов:
-    reply или text_mention/mention/@username из кэша.
-    """
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
-        return u.id, u.full_name    text = message.text or ""
-
+        return u.id, u.full_name
+    text = message.text or ""
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
@@ -641,14 +705,12 @@ def extract_target_user(message: types.Message):
                 if uid:
                     return uid, username
                 return None, username
-
     username = extract_username_from_text(text)
     if username:
         uid = resolve_username(message.chat.id, username)
         if uid:
             return uid, username
         return None, username
-
     return None, None
 
 
@@ -707,10 +769,6 @@ async def bot_can_delete(message: types.Message) -> bool:
 
 
 def parse_minutes(args: list[str]) -> int | None:
-    """
-    Ищет первое число в аргументах (минуты).
-    Пропускает @username и числовой ID (>= 6 знаков).
-    """
     for a in args[1:]:
         if a.isdigit() and len(a) <= 5:
             n = int(a)
@@ -736,11 +794,11 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    # Кэшируем автора
     cache_user(message.chat.id, message.from_user)
     await message.answer(
         "👋 Привет! Я бот-цензор и не только.\n\n"
         "🛡 Удаляю мат автоматически (в т.ч. замаскированный)\n"
+        "🧹 Чищу сервисные сообщения (вход/выход/приглашения)\n"
         "🎲 Имею кучу развлекательных команд\n"
         "🔨 Могу модерировать чат\n\n"
         "📌 Напиши /help для списка команд."
@@ -766,12 +824,20 @@ async def cmd_help(message: types.Message):
         "/tempban &lt;мин&gt; @user или reply — временный бан\n"
         "/mute &lt;мин&gt; @user или reply — замутить\n"
         "/unmute @user или reply — снять мут\n\n"
-        "<b>🛡 Управление цензурой (для админов):</b>\n"
+        "<b>🛡 Управление (для админов):</b>\n"
         "/censor — включить фильтр мата\n"
         "/uncensor — выключить фильтр мата\n"
-        "/censor_status — статус фильтра\n\n"
-        "💡 <i>По @username работает, если пользователь хоть раз писал "
-        "в этом чате (бот запоминает username). Иначе — только reply или числовой ID.</i>"
+        "/censor_status — статус фильтра\n"
+        "/service_on — включить чистку сервисных сообщений\n"
+        "/service_off — выключить чистку\n"
+        "/service_status — статус чистки\n\n"
+        "🧹 <i>Бот автоматически удаляет:\n"
+        "• @X пригласил @Y\n"
+        "• @X добавил @Y\n"
+        "• @X вступил/присоединился\n"
+        "• @X вышел/покинул\n"
+        "• @X удалил @Y\n"
+        "• закреплённые сообщения</i>"
     )
 
 
@@ -811,6 +877,44 @@ async def cmd_censor_status(message: types.Message):
     emoji = "✅" if status else "🔓"
     state = "включена" if status else "выключена"
     await message.answer(f"{emoji} Цензура сейчас <b>{state}</b>.")
+
+
+@dp.message(Command("service_on"))
+@dp.message(Command("чистка_вкл"))
+async def cmd_service_on(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("❌ Команда работает только в группах.")
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут управлять чисткой.")
+        return
+    SERVICE_CLEANER_ENABLED[message.chat.id] = True
+    await message.answer("✅ Чистка сервисных сообщений <b>включена</b>.")
+
+
+@dp.message(Command("service_off"))
+@dp.message(Command("чистка_выкл"))
+async def cmd_service_off(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("❌ Команда работает только в группах.")
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут управлять чисткой.")
+        return
+    SERVICE_CLEANER_ENABLED[message.chat.id] = False
+    await message.answer("🔓 Чистка сервисных сообщений <b>выключена</b>.")
+
+
+@dp.message(Command("service_status"))
+@dp.message(Command("статусчистки"))
+async def cmd_service_status(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("❌ Команда работает только в группах.")
+        return
+    status = SERVICE_CLEANER_ENABLED.get(message.chat.id, True)
+    emoji = "✅" if status else "🔓"
+    state = "включена" if status else "выключена"
+    await message.answer(f"{emoji} Чистка сервисных сообщений <b>{state}</b>.")
 
 
 # ==================== /delete ====================
@@ -883,7 +987,6 @@ def make_game_id(chat_id: int, user_id: int) -> str:
 async def cmd_rps(message: types.Message):
     target_id, target_name = extract_target_user(message)
 
-    # Если нашли @username, но не нашли ID — предупреждаем
     if target_id is None and target_name:
         await message.reply(
             f"❌ Не удалось найти <code>{target_name}</code> в кэше чата.\n"
@@ -891,7 +994,6 @@ async def cmd_rps(message: types.Message):
         )
         return
 
-    # Игра с ботом
     if target_id is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
@@ -1077,14 +1179,12 @@ async def cmd_kick(message: types.Message):
     if not await bot_can_restrict(message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
     if not await check_target(message, user_id, name):
         return
-
     try:
         await bot.ban_chat_member(message.chat.id, user_id)
         await bot.unban_chat_member(message.chat.id, user_id)
@@ -1102,14 +1202,12 @@ async def cmd_ban(message: types.Message):
     if not await bot_can_restrict(message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
     if not await check_target(message, user_id, name):
         return
-
     try:
         await bot.ban_chat_member(message.chat.id, user_id)
         await message.answer(f"🔨 {name} забанен навсегда.")
@@ -1126,12 +1224,10 @@ async def cmd_unban(message: types.Message):
     if not await bot_can_restrict(message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
-
     try:
         await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
         await message.answer(f"🔓 {name} разбанен.")
@@ -1148,20 +1244,17 @@ async def cmd_tempban(message: types.Message):
     if not await bot_can_restrict(message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
     if not await check_target(message, user_id, name):
         return
-
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
         await message.reply("❌ Укажи время в минутах: <code>/tempban 30</code>")
         return
-
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
         await bot.ban_chat_member(message.chat.id, user_id, until_date=until_ts)
@@ -1182,20 +1275,17 @@ async def cmd_mute(message: types.Message):
     if not await bot_can_restrict(message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
     if not await check_target(message, user_id, name):
         return
-
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
         await message.reply("❌ Укажи время в минутах: <code>/mute 15</code>")
         return
-
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
         await bot.restrict_chat_member(
@@ -1218,12 +1308,10 @@ async def cmd_unmute(message: types.Message):
     if not await is_admin(message):
         await message.reply("❌ Только админы могут использовать эту команду.")
         return
-
     user_id, name, err = await resolve_target(message)
     if err:
         await message.reply(err)
         return
-
     try:
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
@@ -1250,17 +1338,77 @@ async def cmd_unmute(message: types.Message):
         await message.reply(f"❌ Не удалось размутить: {e}")
 
 
-# ==================== ФИЛЬТР МАТА ====================
+# ==================== АВТОУДАЛЕНИЕ СЕРВИСНЫХ СООБЩЕНИЙ ====================
+
+@dp.message(F.new_chat_members)
+async def on_new_chat_members(message: types.Message):
+    """Ловит сервисные сообщения о входе/приглашении."""
+    if not service_cleaner_enabled(message.chat.id):
+        return
+    try:
+        await message.delete()
+        logging.info(f"Удалено сервисное сообщение (new_chat_members) в {message.chat.id}")
+    except Exception as e:
+        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+
+
+@dp.message(F.left_chat_member)
+async def on_left_chat_member(message: types.Message):
+    """Ловит сервисные сообщения о выходе."""
+    if not service_cleaner_enabled(message.chat.id):
+        return
+    try:
+        await message.delete()
+        logging.info(f"Удалено сервисное сообщение (left_chat_member) в {message.chat.id}")
+    except Exception as e:
+        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+
+
+@dp.message(F.pinned_message)
+async def on_pinned_message(message: types.Message):
+    """Ловит сервисные сообщения о закреплении."""
+    if not service_cleaner_enabled(message.chat.id):
+        return
+    try:
+        await message.delete()
+        logging.info(f"Удалено сервисное сообщение (pinned_message) в {message.chat.id}")
+    except Exception as e:
+        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+
+
+@dp.message(F.new_chat_title | F.new_chat_photo | F.delete_chat_photo)
+async def on_chat_changes(message: types.Message):
+    """Ловит сервисные сообщения об изменении названия/аватара чата."""
+    if not service_cleaner_enabled(message.chat.id):
+        return
+    try:
+        await message.delete()
+        logging.info(f"Удалено сервисное сообщение (chat_changes) в {message.chat.id}")
+    except Exception as e:
+        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    # Кэшируем автора (для резолва @username)
+    """Общий хендлер: кэш + мат + сервисные по тексту."""
+    # Кэшируем автора
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
-    # Кэшируем автора reply-сообщения
     if message.reply_to_message and message.reply_to_message.from_user:
         cache_user(message.chat.id, message.reply_to_message.from_user)
 
+    # Проверяем сервисные по тексту (для клиентов, которые шлют их как текст)
+    if service_cleaner_enabled(message.chat.id) and is_service_message(message):
+        try:
+            await message.delete()
+            logging.info(
+                f"Удалено сервисное сообщение (text) в {message.chat.id}"
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+        return
+
+    # Мат
     if not message.text:
         return
     if message.text.startswith("/"):
@@ -1293,6 +1441,9 @@ async def set_commands():
         types.BotCommand(command="censor", description="Включить цензуру"),
         types.BotCommand(command="uncensor", description="Выключить цензуру"),
         types.BotCommand(command="censor_status", description="Статус цензуры"),
+        types.BotCommand(command="service_on", description="Вкл. чистку сервисных"),
+        types.BotCommand(command="service_off", description="Выкл. чистку сервисных"),
+        types.BotCommand(command="service_status", description="Статус чистки"),
         types.BotCommand(command="kick", description="Кикнуть (@user или reply)"),
         types.BotCommand(command="ban", description="Забанить (@user или reply)"),
         types.BotCommand(command="unban", description="Разбанить (@user/ID/reply)"),
