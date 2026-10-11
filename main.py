@@ -30,7 +30,43 @@ dp = Dispatcher()
 
 TEMP_BANS = {}
 TEMP_MUTES = {}
-RPS_GAMES = {}  # {game_id: {...}}
+RPS_GAMES = {}
+
+# ==================== КАРТА ПОХОЖИХ СИМВОЛОВ ====================
+
+HOMOGLYPHS = str.maketrans({
+    "a": "а", "A": "а",
+    "e": "е", "E": "е",
+    "o": "о", "O": "о",
+    "p": "р", "P": "р",
+    "c": "с", "C": "с",
+    "x": "х", "X": "х",
+    "y": "у", "Y": "у",
+    "k": "к", "K": "к",
+    "m": "м", "M": "м",
+    "t": "т", "T": "т",
+    "h": "н", "H": "н",
+    "b": "в", "B": "в",
+    "n": "п", "N": "п",
+    "0": "о",
+    "1": "и",
+    "3": "з",
+    "4": "а",
+    "6": "б",
+    "8": "в",
+    "9": "д",
+})
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower()
+    text = text.translate(HOMOGLYPHS)
+    text = re.sub(r"[^а-яёa-z]", "", text)
+    text = re.sub(r"(.)\1{2,}", r"\1", text)
+    return text
+
 
 # ==================== СПИСКИ ЗАПРЕЩЁННЫХ СЛОВ ====================
 
@@ -340,38 +376,16 @@ BAD_WORDS = [
 ]
 
 MAT_PATTERN = re.compile(
-    r"(?<![а-яёa-z])(" + "|".join(MAT_ROOTS) + r")[а-яёa-z]*",
+    r"(" + "|".join(MAT_ROOTS) + r")",
     re.IGNORECASE
 )
 
 BAD_WORD_PATTERN = re.compile(
-    r"(?<![а-яёa-z])(" + "|".join(map(re.escape, BAD_WORDS)) + r")(?![а-яёa-z])",
+    r"(" + "|".join(map(re.escape, BAD_WORDS)) + r")",
     re.IGNORECASE
 )
 
-# ==================== ТИТУЛЫ ====================
-
-TITLES = [
-    "🐉 Повелитель драконов", "🧙 Верховный маг", "👑 Император чата",
-    "🤡 Шут гороховый", "🥔 Картофельный магнат", "🐸 Жаба-путешественница",
-    "🦆 Утка-ниндзя", "🐱 Кот-философ", "🐶 Пёс-хранитель",
-    "🦊 Хитрый лис", "🐻 Медведь-шаман", "🦉 Сова-всезнайка",
-    "🐼 Панда-ленивец", "🦁 Лев-царь зверей", "🐧 Пингвин-джентльмен",
-    "🦄 Единорог-мечтатель", "🐲 Дракон-хранитель", "👾 Космический захватчик",
-    "🤖 Робот-терминатор", "👻 Призрак-невидимка", "🧛 Вампир-полуночник",
-    "🧟 Зомби-апокалипсис", "🧜 Русалка-соблазнительница", "🧚 Фея-волшебница",
-    "🦸 Супергерой", "🦹 Злодей-мастермайнд", "🥷 Ниндзя-невидимка",
-    "🤠 Ковбой Дикого Запада", "👽 Пришелец с Марса", "🎃 Тыква-хэллоуин",
-    "🎅 Дед Мороз", "🧝 Эльф-лучник", "🧞 Джинн-исполнитель желаний",
-    "🗿 Каменный истукан", "🌮 Тако-гурман", "🍕 Пицца-мастер",
-    "🍔 Бургер-король", "🍣 Суши-сенсей", "☕ Кофейный маньяк",
-    "🍺 Пивной барон", "🎮 Геймер-легенда", "💻 Кодер-хакер",
-    "🎸 Рок-звезда", "🎤 Рэпер-гуф", "🎨 Художник-абстракционист",
-    "📚 Книжный червь", "🧠 Мозговой штурм", "💪 Качок-атлет",
-    "🏃 Бегун-марафонец", "🛌 Лежебока-профессионал", "🍿 Кинокритик",
-    "🎭 Актёр-драмы", "🎪 Клоун-эквилибрист", "🃏 Джокер-шутник",
-    "♟️ Шахматный гроссмейстер", "🎯 Снайпер-меткий", "🏆 Чемпион чата",
-]
+# ==================== МАГИЧЕСКИЙ ШАР ====================
 
 MAGIC_8_BALL = [
     "🎱 Да, однозначно.", "🎱 Нет, даже не думай.", "🎱 Возможно.",
@@ -388,7 +402,14 @@ MAGIC_8_BALL = [
 # ==================== УТИЛИТЫ ====================
 
 def has_bad_words(text: str) -> bool:
-    return bool(MAT_PATTERN.search(text) or BAD_WORD_PATTERN.search(text))
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    if MAT_PATTERN.search(normalized):
+        return True
+    if BAD_WORD_PATTERN.search(normalized):
+        return True
+    return False
 
 
 def extract_target_user(message: types.Message):
@@ -420,7 +441,6 @@ async def is_admin(message: types.Message) -> bool:
 
 
 async def is_target_admin(message: types.Message, target_id: int) -> bool:
-    """Проверяет, является ли цель админом или владельцем чата."""
     if message.chat.type == ChatType.PRIVATE:
         return False
     try:
@@ -432,7 +452,6 @@ async def is_target_admin(message: types.Message, target_id: int) -> bool:
 
 
 async def is_target_bot(message: types.Message, target_id: int) -> bool:
-    """Проверяет, является ли цель самим ботом."""
     try:
         me = await bot.get_me()
         return target_id == me.id
@@ -450,6 +469,19 @@ async def bot_can_restrict(message: types.Message) -> bool:
         return False
 
 
+async def bot_can_delete(message: types.Message) -> bool:
+    """Проверяет, может ли бот удалять сообщения в чате."""
+    if message.chat.type == ChatType.PRIVATE:
+        return False
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(message.chat.id, me.id)
+        return bool(getattr(member, "can_delete_messages", False))
+    except Exception as e:
+        logging.warning(f"bot_can_delete: {e}")
+        return False
+
+
 def parse_minutes(args: list[str]) -> int | None:
     for a in args[1:]:
         if a.isdigit():
@@ -460,10 +492,6 @@ def parse_minutes(args: list[str]) -> int | None:
 
 
 async def check_target(message: types.Message, user_id: int, name: str) -> bool:
-    """
-    Общая проверка цели для модерации.
-    Возвращает True, если цель можно наказывать.
-    """
     if await is_target_bot(message, user_id):
         await message.reply("🤖 Нельзя наказывать самого бота.")
         return False
@@ -482,7 +510,7 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я бот-цензор и не только.\n\n"
-        "🛡 Удаляю мат автоматически\n"
+        "🛡 Удаляю мат автоматически (в т.ч. замаскированный)\n"
         "🎲 Имею кучу развлекательных команд\n"
         "🔨 Могу модерировать чат\n\n"
         "📌 Напиши /help для списка команд."
@@ -499,17 +527,72 @@ async def cmd_help(message: types.Message):
         "/rps @user или reply — КНБ с другим участником\n"
         "/dice — бросить кубик (1–6)\n"
         "/coin — орёл или решка\n"
-        "/title — выдать смешной титул (себе или reply)\n"
         "/ball &lt;вопрос&gt; — магический шар\n\n"
         "<b>🔨 Модерация (для админов):</b>\n"
+        "/delete — удалить сообщение (reply) и саму команду\n"
         "/kick — кикнуть (reply)\n"
         "/ban — забанить (reply)\n"
         "/tempban &lt;мин&gt; — временный бан (reply)\n"
         "/mute &lt;мин&gt; — замутить (reply)\n"
         "/unmute — снять мут (reply)\n\n"
         "🛡 <i>Админов и владельца чата наказать нельзя.</i>\n"
-        "🇷🇺 <i>Русские алиасы тоже работают: /кнб /кубик /монетка /титул /шар /кик /бан /врембан /мут /размут</i>"
+        "🇷🇺 <i>Русские алиасы: /кнб /кубик /монетка /шар /удалить /кик /бан /врембан /мут /размут</i>"
     )
+
+
+# ==================== /delete ====================
+
+@dp.message(Command("delete"))
+@dp.message(Command("удалить"))
+async def cmd_delete(message: types.Message):
+    # Только в группах
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("❌ Команда работает только в группах.")
+        return
+
+    # Только админы
+    if not await is_admin(message):
+        # Удаляем саму команду, чтобы не засорять чат
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # Проверяем права бота на удаление
+    if not await bot_can_delete(message):
+        await message.reply("❌ У меня нет прав на удаление сообщений.")
+        return
+
+    # Должен быть reply
+    if not message.reply_to_message:
+        # Удаляем саму команду, чтобы не засорять чат
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                message.chat.id,
+                "❌ Ответь (reply) на сообщение, которое нужно удалить."
+            )
+        except Exception:
+            pass
+        return
+
+    target_id = message.reply_to_message.message_id
+
+    # Удаляем целевое сообщение
+    try:
+        await bot.delete_message(message.chat.id, target_id)
+    except Exception as e:
+        logging.warning(f"delete target: {e}")
+
+    # Удаляем саму команду
+    try:
+        await message.delete()
+    except Exception as e:
+        logging.warning(f"delete command: {e}")
 
 
 # ==================== КНБ ====================
@@ -536,8 +619,6 @@ def rps_result(a: str, b: str) -> str:
 
 
 def rps_keyboard(game_id: str) -> InlineKeyboardMarkup:
-    # ВАЖНО: game_id должен содержать только цифры/подчёркивания,
-    # потому что callback_data парсится по ":".
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✊ Камень", callback_data=f"rps:{game_id}:rock"),
         InlineKeyboardButton(text="✌️ Ножницы", callback_data=f"rps:{game_id}:scissors"),
@@ -546,7 +627,6 @@ def rps_keyboard(game_id: str) -> InlineKeyboardMarkup:
 
 
 def make_game_id(chat_id: int, user_id: int) -> str:
-    """Только цифры и подчёркивания — безопасно для callback_data."""
     return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
 
 
@@ -555,7 +635,6 @@ def make_game_id(chat_id: int, user_id: int) -> str:
 async def cmd_rps(message: types.Message):
     target_id, target_name = extract_target_user(message)
 
-    # Игра с ботом
     if target_id is None and target_name is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
@@ -578,18 +657,15 @@ async def cmd_rps(message: types.Message):
         )
         return
 
-    # Цель — сам автор
     if target_id == message.from_user.id:
         await message.reply("❌ Нельзя играть с самим собой.")
         return
 
-    # Цель — бот
     me = await bot.get_me()
     if target_id == me.id:
         await message.reply("🤖 Чтобы сыграть со мной, напиши просто /rps без аргументов.")
         return
 
-    # Если только @username без id — не можем создать PvP надёжно
     if target_id is None:
         await message.reply(
             "❌ Не удалось определить пользователя.\n"
@@ -597,7 +673,6 @@ async def cmd_rps(message: types.Message):
         )
         return
 
-    # PvP
     game_id = make_game_id(message.chat.id, message.from_user.id)
     target_mention = f'<a href="tg://user?id={target_id}">{target_name}</a>'
 
@@ -637,7 +712,6 @@ async def rps_callback(call: CallbackQuery):
 
     user_id = call.from_user.id
 
-    # ===== Игра с ботом =====
     if game["is_bot"]:
         if user_id != game["player_a"]:
             await call.answer("Эта игра не твоя.", show_alert=True)
@@ -667,7 +741,6 @@ async def rps_callback(call: CallbackQuery):
         RPS_GAMES.pop(game_id, None)
         return
 
-    # ===== PvP =====
     if user_id == game["player_a"]:
         slot = "a"
     elif user_id == game["player_b"]:
@@ -683,7 +756,6 @@ async def rps_callback(call: CallbackQuery):
     game[f"choice_{slot}"] = choice
     await call.answer(f"Ты выбрал: {RPS_CHOICES[choice]}")
 
-    # Оба сделали выбор
     if game["choice_a"] is not None and game["choice_b"] is not None:
         ca, cb = game["choice_a"], game["choice_b"]
         result = rps_result(ca, cb)
@@ -708,7 +780,6 @@ async def rps_callback(call: CallbackQuery):
         RPS_GAMES.pop(game_id, None)
         return
 
-    # Один сделал выбор — ждём второго
     if game["choice_a"] is not None:
         next_name = game["b_mention"]
     else:
@@ -739,23 +810,6 @@ async def cmd_dice(message: types.Message):
 async def cmd_coin(message: types.Message):
     result = random.choice(["🪙 Орёл", "🪙 Решка"])
     await message.answer(f"Подбрасываю... <b>{result}</b>")
-
-
-@dp.message(Command("title"))
-@dp.message(Command("титул"))
-async def cmd_title(message: types.Message):
-    user_id, name = extract_target_user(message)
-
-    if name is None:
-        name = message.from_user.full_name
-        mention = message.from_user.mention_html()
-    elif user_id:
-        mention = f'<a href="tg://user?id={user_id}">{name}</a>'
-    else:
-        mention = name
-
-    title = random.choice(TITLES)
-    await message.answer(f"👑 {mention} получает титул:\n\n<b>{title}</b>")
 
 
 @dp.message(Command("ball"))
@@ -967,8 +1021,8 @@ async def set_commands():
         types.BotCommand(command="rps", description="КНБ с ботом или @user"),
         types.BotCommand(command="dice", description="Бросить кубик"),
         types.BotCommand(command="coin", description="Орёл или решка"),
-        types.BotCommand(command="title", description="Выдать смешной титул"),
         types.BotCommand(command="ball", description="Магический шар"),
+        types.BotCommand(command="delete", description="Удалить сообщение (reply)"),
         types.BotCommand(command="kick", description="Кикнуть (reply)"),
         types.BotCommand(command="ban", description="Забанить (reply)"),
         types.BotCommand(command="tempban", description="Врембан (reply)"),
