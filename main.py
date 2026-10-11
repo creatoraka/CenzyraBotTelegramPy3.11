@@ -4,10 +4,11 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, ChatType
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 # ==================== КОНФИГ ====================
 
@@ -27,9 +28,9 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Хранилища активных наказаний
-TEMP_BANS = {}   # {chat_id: {user_id: until_datetime}}
-TEMP_MUTES = {}  # {chat_id: {user_id: until_datetime}}
+TEMP_BANS = {}
+TEMP_MUTES = {}
+RPS_GAMES = {}  # {game_id: {...}}
 
 # ==================== СПИСКИ ЗАПРЕЩЁННЫХ СЛОВ ====================
 
@@ -391,16 +392,10 @@ def has_bad_words(text: str) -> bool:
 
 
 def extract_target_user(message: types.Message):
-    """
-    Возвращает (user_id, display_name) цели.
-    user_id может быть None, если найден только @username без text_mention.
-    """
-    # 1) reply
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
         return u.id, u.full_name
 
-    # 2) entities
     if message.entities and message.text:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
@@ -414,7 +409,6 @@ def extract_target_user(message: types.Message):
 
 
 async def is_admin(message: types.Message) -> bool:
-    """Проверяет, что автор команды — админ/создатель (или это личка)."""
     if message.chat.type == ChatType.PRIVATE:
         return True
     try:
@@ -426,7 +420,6 @@ async def is_admin(message: types.Message) -> bool:
 
 
 async def bot_can_restrict(message: types.Message) -> bool:
-    """Проверяет, что бот — админ с правом ограничения."""
     try:
         me = await bot.get_me()
         member = await bot.get_chat_member(message.chat.id, me.id)
@@ -437,7 +430,6 @@ async def bot_can_restrict(message: types.Message) -> bool:
 
 
 def parse_minutes(args: list[str]) -> int | None:
-    """Ищет первое число в аргументах (минуты)."""
     for a in args[1:]:
         if a.isdigit():
             n = int(a)
@@ -455,55 +447,231 @@ async def cmd_start(message: types.Message):
         "🛡 Удаляю мат автоматически\n"
         "🎲 Имею кучу развлекательных команд\n"
         "🔨 Могу модерировать чат\n\n"
-        "📌 Напиши /помощь для списка команд."
+        "📌 Напиши /help для списка команд."
     )
 
 
-@dp.message(Command("помощь"))
 @dp.message(Command("help"))
+@dp.message(Command("помощь"))  # русский алиас (в меню не виден, но работает)
 async def cmd_help(message: types.Message):
     await message.answer(
         "🛡 <b>Бот-цензор</b>\n\n"
         "<b>🎲 Развлечения:</b>\n"
-        "/кнб — камень-ножницы-бумага\n"
-        "/кубик — бросить кубик (1–6)\n"
-        "/монетка — орёл или решка\n"
-        "/титул — выдать смешной титул (себе или reply)\n"
-        "/шар &lt;вопрос&gt; — магический шар\n\n"
+        "/rps — камень-ножницы-бумага с ботом\n"
+        "/rps @user — игра с другим участником (PvP)\n"
+        "/dice — бросить кубик (1–6)\n"
+        "/coin — орёл или решка\n"
+        "/title — выдать смешной титул (себе или reply)\n"
+        "/ball &lt;вопрос&gt; — магический шар\n\n"
         "<b>🔨 Модерация (для админов):</b>\n"
-        "/кик — кикнуть (reply на сообщение)\n"
-        "/бан — забанить\n"
-        "/врембан &lt;мин&gt; — временный бан\n"
-        "/мут &lt;мин&gt; — замутить\n"
-        "/размут — снять мут\n\n"
-        "💡 <i>Все команды модерации работают через reply на сообщение нарушителя.</i>"
+        "/kick — кикнуть (reply)\n"
+        "/ban — забанить (reply)\n"
+        "/tempban &lt;мин&gt; — временный бан (reply)\n"
+        "/mute &lt;мин&gt; — замутить (reply)\n"
+        "/unmute — снять мут (reply)\n\n"
+        "💡 <i>Команды модерации работают через reply на сообщение нарушителя.</i>\n"
+        "🇷🇺 <i>Русские алиасы тоже работают: /кнб /кубик /монетка /титул /шар /кик /бан /врембан /мут /размут</i>"
     )
 
 
-# ==================== РАЗВЛЕКАТЕЛЬНЫЕ КОМАНДЫ ====================
+# ==================== РАЗВЛЕКАТЕЛЬНЫЕ ====================
 
+RPS_CHOICES = {
+    "rock": "✊ Камень",
+    "scissors": "✌️ Ножницы",
+    "paper": "✋ Бумага",
+}
+
+RPS_BEATS = {
+    "rock": "scissors",
+    "scissors": "paper",
+    "paper": "rock",
+}
+
+
+def rps_result(a: str, b: str) -> str:
+    if a == b:
+        return "draw"
+    if RPS_BEATS[a] == b:
+        return "a"
+    return "b"
+
+
+def rps_keyboard(game_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✊ Камень", callback_data=f"rps:{game_id}:rock"),
+        InlineKeyboardButton(text="✌️ Ножницы", callback_data=f"rps:{game_id}:scissors"),
+        InlineKeyboardButton(text="✋ Бумага", callback_data=f"rps:{game_id}:paper"),
+    ]])
+
+
+@dp.message(Command("rps"))
 @dp.message(Command("кнб"))
 async def cmd_rps(message: types.Message):
-    choices = ["✊ Камень", "✌️ Ножницы", "✋ Бумага"]
-    bot_choice = random.choice(choices)
+    args = (message.text or "").split()
+    target_id, target_name = extract_target_user(message)
+
+    # Если нет цели — игра с ботом
+    if target_id is None and target_name is None:
+        # Если в args есть @username, но text_mention не сработал
+        bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
+        await message.answer(
+            f"🤖 Играем с ботом!\n\n"
+            f"Мой выбор уже сделан. Нажми свою кнопку:",
+            reply_markup=rps_keyboard("bot")
+        )
+        # Сохраняем выбор бота для игры с ботом
+        RPS_GAMES[f"bot:{message.chat.id}:{message.from_user.id}"] = {
+            "player_a": message.from_user.id,
+            "choice_a": None,
+            "choice_b": bot_choice_key,
+            "is_bot": True,
+            "a_name": message.from_user.full_name,
+            "b_name": "🤖 Бот",
+        }
+        return
+
+    # Если цель — сам автор
+    if target_id == message.from_user.id:
+        await message.reply("❌ Нельзя играть с самим собой.")
+        return
+
+    # Создаём PvP игру
+    game_id = f"{message.chat.id}:{message.from_user.id}:{random.randint(1000, 9999)}"
+    RPS_GAMES[game_id] = {
+        "player_a": message.from_user.id,
+        "player_b": target_id,
+        "choice_a": None,
+        "choice_b": None,
+        "is_bot": False,
+        "a_name": message.from_user.full_name,
+        "b_name": target_name or "Соперник",
+    }
+
     await message.answer(
-        f"🤖 Мой выбор: <b>{bot_choice}</b>\n\n"
-        f"А ты что выберешь? Напиши: камень / ножницы / бумага"
+        f"🎮 <b>Вызов на КНБ!</b>\n\n"
+        f"🥊 {message.from_user.mention_html()} vs {target_name or 'Соперник'}\n\n"
+        f"Игрок 1, выбери свой ход:",
+        reply_markup=rps_keyboard(game_id)
     )
 
 
+@dp.callback_query(F.data.startswith("rps:"))
+async def rps_callback(call: CallbackQuery):
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        await call.answer("Некорректный вызов.")
+        return
+
+    _, game_id, choice = parts
+
+    # Игра с ботом
+    if game_id == "bot":
+        # Ключ: bot:{chat_id}:{user_id}
+        key = f"bot:{call.message.chat.id}:{call.from_user.id}"
+        game = RPS_GAMES.get(key)
+        if not game:
+            await call.answer("Игра не найдена. Начни заново: /rps")
+            return
+        if game["player_a"] != call.from_user.id:
+            await call.answer("Эта игра не твоя.", show_alert=True)
+            return
+
+        player_choice = choice
+        bot_choice = game["choice_b"]
+        result = rps_result(player_choice, bot_choice)
+
+        if result == "draw":
+            verdict = "🤝 Ничья!"
+        elif result == "a":
+            verdict = "🎉 Ты победил!"
+        else:
+            verdict = "😢 Бот победил!"
+
+        await call.message.edit_text(
+            f"🎮 <b>КНБ с ботом</b>\n\n"
+            f"👤 Ты: {RPS_CHOICES[player_choice]}\n"
+            f"🤖 Бот: {RPS_CHOICES[bot_choice]}\n\n"
+            f"<b>{verdict}</b>"
+        )
+        await call.answer()
+        RPS_GAMES.pop(key, None)
+        return
+
+    # PvP игра
+    game = RPS_GAMES.get(game_id)
+    if not game:
+        await call.answer("Игра не найдена или уже завершена.", show_alert=True)
+        return
+
+    user_id = call.from_user.id
+    if user_id == game["player_a"]:
+        slot = "a"
+    elif user_id == game["player_b"]:
+        slot = "b"
+    else:
+        await call.answer("Ты не участник этой игры.", show_alert=True)
+        return
+
+    if game.get(f"choice_{slot}") is not None:
+        await call.answer("Ты уже сделал выбор!", show_alert=True)
+        return
+
+    game[f"choice_{slot}"] = choice
+    await call.answer(f"Ты выбрал: {RPS_CHOICES[choice]}")
+
+    # Если оба сделали выбор — показываем результат
+    if game["choice_a"] is not None and game["choice_b"] is not None:
+        ca = game["choice_a"]
+        cb = game["choice_b"]
+        result = rps_result(ca, cb)
+
+        if result == "draw":
+            verdict = "🤝 Ничья!"
+        elif result == "a":
+            verdict = f"🏆 Победил {game['a_name']}!"
+        else:
+            verdict = f"🏆 Победил {game['b_name']}!"
+
+        try:
+            await call.message.edit_text(
+                f"🎮 <b>КНБ — результат</b>\n\n"
+                f"👤 {game['a_name']}: {RPS_CHOICES[ca]}\n"
+                f"👤 {game['b_name']}: {RPS_CHOICES[cb]}\n\n"
+                f"<b>{verdict}</b>"
+            )
+        except Exception:
+            await call.message.answer(
+                f"🎮 <b>КНБ — результат</b>\n\n"
+                f"👤 {game['a_name']}: {RPS_CHOICES[ca]}\n"
+                f"👤 {game['b_name']}: {RPS_CHOICES[cb]}\n\n"
+                f"<b>{verdict}</b>"
+            )
+        RPS_GAMES.pop(game_id, None)
+    else:
+        # Один сделал выбор — ждём второго
+        await call.message.edit_text(
+            f"🎮 <b>КНБ</b>\n\n"
+            f"{game['a_name']} vs {game['b_name']}\n\n"
+            f"Ожидание второго игрока..."
+        )
+
+
+@dp.message(Command("dice"))
 @dp.message(Command("кубик"))
 async def cmd_dice(message: types.Message):
     value = random.randint(1, 6)
     await message.answer(f"🎲 Выпало: <b>{value}</b>")
 
 
+@dp.message(Command("coin"))
 @dp.message(Command("монетка"))
 async def cmd_coin(message: types.Message):
     result = random.choice(["🪙 Орёл", "🪙 Решка"])
     await message.answer(f"Подбрасываю... <b>{result}</b>")
 
 
+@dp.message(Command("title"))
 @dp.message(Command("титул"))
 async def cmd_title(message: types.Message):
     user_id, name = extract_target_user(message)
@@ -514,19 +682,19 @@ async def cmd_title(message: types.Message):
     elif user_id:
         mention = f'<a href="tg://user?id={user_id}">{name}</a>'
     else:
-        # только @username — оставим как есть
         mention = name
 
     title = random.choice(TITLES)
     await message.answer(f"👑 {mention} получает титул:\n\n<b>{title}</b>")
 
 
+@dp.message(Command("ball"))
 @dp.message(Command("шар"))
 async def cmd_ball(message: types.Message):
     text = message.text or ""
     parts = text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("🔮 Задай вопрос: <code>/шар Я стану миллионером?</code>")
+        await message.answer("🔮 Задай вопрос: <code>/ball Я стану миллионером?</code>")
         return
 
     question = parts[1].strip()
@@ -536,6 +704,7 @@ async def cmd_ball(message: types.Message):
 
 # ==================== МОДЕРАЦИЯ ====================
 
+@dp.message(Command("kick"))
 @dp.message(Command("кик"))
 async def cmd_kick(message: types.Message):
     if not await is_admin(message):
@@ -558,6 +727,7 @@ async def cmd_kick(message: types.Message):
         await message.reply(f"❌ Не удалось кикнуть: {e}")
 
 
+@dp.message(Command("ban"))
 @dp.message(Command("бан"))
 async def cmd_ban(message: types.Message):
     if not await is_admin(message):
@@ -579,6 +749,7 @@ async def cmd_ban(message: types.Message):
         await message.reply(f"❌ Не удалось забанить: {e}")
 
 
+@dp.message(Command("tempban"))
 @dp.message(Command("врембан"))
 async def cmd_tempban(message: types.Message):
     if not await is_admin(message):
@@ -596,23 +767,21 @@ async def cmd_tempban(message: types.Message):
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
-        await message.reply("❌ Укажи время в минутах, например: <code>/врембан 30</code>")
+        await message.reply("❌ Укажи время в минутах: <code>/tempban 30</code>")
         return
 
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
-        await bot.ban_chat_member(
-            message.chat.id, user_id, until_date=until_ts
-        )
+        await bot.ban_chat_member(message.chat.id, user_id, until_date=until_ts)
         TEMP_BANS.setdefault(message.chat.id, {})[user_id] = (
             datetime.now() + timedelta(minutes=minutes)
         )
         await message.answer(f"⏱ {name} забанен на <b>{minutes} мин.</b>")
-        # Telegram сам разбанит по until_date, доп. задача не нужна
     except Exception as e:
         await message.reply(f"❌ Не удалось забанить: {e}")
 
 
+@dp.message(Command("mute"))
 @dp.message(Command("мут"))
 async def cmd_mute(message: types.Message):
     if not await is_admin(message):
@@ -630,7 +799,7 @@ async def cmd_mute(message: types.Message):
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
-        await message.reply("❌ Укажи время в минутах, например: <code>/мут 15</code>")
+        await message.reply("❌ Укажи время в минутах: <code>/mute 15</code>")
         return
 
     try:
@@ -649,6 +818,7 @@ async def cmd_mute(message: types.Message):
         await message.reply(f"❌ Не удалось замутить: {e}")
 
 
+@dp.message(Command("unmute"))
 @dp.message(Command("размут"))
 async def cmd_unmute(message: types.Message):
     if not await is_admin(message):
@@ -686,7 +856,7 @@ async def cmd_unmute(message: types.Message):
         await message.reply(f"❌ Не удалось размутить: {e}")
 
 
-# ==================== ФИЛЬТР МАТА (ПОСЛЕДНИМ) ====================
+# ==================== ФИЛЬТР МАТА ====================
 
 @dp.message()
 async def filter_messages(message: types.Message):
@@ -709,19 +879,24 @@ async def filter_messages(message: types.Message):
 # ==================== РЕГИСТРАЦИЯ КОМАНД ====================
 
 async def set_commands():
+    """
+    ВАЖНО: Telegram показывает в меню только латинские команды
+    (a-z, 0-9, _). Русские алиасы работают, но в меню не видны.
+    Поэтому здесь только латиница.
+    """
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
-        types.BotCommand(command="помощь", description="Список всех команд"),
-        types.BotCommand(command="кнб", description="Камень-ножницы-бумага"),
-        types.BotCommand(command="кубик", description="Бросить кубик"),
-        types.BotCommand(command="монетка", description="Орёл или решка"),
-        types.BotCommand(command="титул", description="Выдать смешной титул"),
-        types.BotCommand(command="шар", description="Магический шар"),
-        types.BotCommand(command="кик", description="Кикнуть участника"),
-        types.BotCommand(command="бан", description="Забанить участника"),
-        types.BotCommand(command="врембан", description="Временный бан"),
-        types.BotCommand(command="мут", description="Замутить участника"),
-        types.BotCommand(command="размут", description="Размутить участника"),
+        types.BotCommand(command="help", description="Все команды бота"),
+        types.BotCommand(command="rps", description="КНБ с ботом или @user"),
+        types.BotCommand(command="dice", description="Бросить кубик"),
+        types.BotCommand(command="coin", description="Орёл или решка"),
+        types.BotCommand(command="title", description="Выдать смешной титул"),
+        types.BotCommand(command="ball", description="Магический шар"),
+        types.BotCommand(command="kick", description="Кикнуть (reply)"),
+        types.BotCommand(command="ban", description="Забанить (reply)"),
+        types.BotCommand(command="tempban", description="Врембан в минутах (reply)"),
+        types.BotCommand(command="mute", description="Мут в минутах (reply)"),
+        types.BotCommand(command="unmute", description="Снять мут (reply)"),
     ]
     try:
         await bot.set_my_commands(commands)
@@ -732,10 +907,7 @@ async def set_commands():
 # ==================== ЗАПУСК ====================
 
 async def main():
-    # Даём старому процессу умереть при перезапуске хостингом
     await asyncio.sleep(5)
-
-    # Сбрасываем возможный вебхук (частая причина конфликтов)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
@@ -744,7 +916,6 @@ async def main():
     await set_commands()
     logging.info("Бот-цензор запущен...")
 
-    # Устойчивый polling: при падении подождать и переподключиться
     while True:
         try:
             await dp.start_polling(bot)
