@@ -26,10 +26,14 @@ dp = Dispatcher()
 
 TEMP_BANS = {}
 TEMP_MUTES = {}
-RPS_GAMES = {}
+RPS_GAMES = {}       # {game_id: {...,"pending": bool}}
+RPS_INVITES = {}     # {invite_id: {chat_id, from_id, to_id, message_id}}
 CENSOR_ENABLED = {}
 USERNAME_CACHE = {}
+USER_ID_TO_NAME = {}  # {(chat_id, user_id): display_name}
 SERVICE_CLEANER_ENABLED = {}
+
+BOT_ID = None  # узнаем при старте
 
 # ==================== НОРМАЛИЗАЦИЯ ====================
 
@@ -55,7 +59,7 @@ def normalize(text: str) -> str:
 
 # ==================== МАТ ====================
 
-# Длинные корни (≥5 букв) — ищутся как подстрока, ложных срабатываний почти нет
+# Длинные корни (≥5 букв) — ищем подстрокой, ложных срабатываний почти нет
 LONG_BAD = [
     "хуесос", "хуеплет", "хуеглот", "хуемраз",
     "пизда", "пизде", "пизду", "пизды", "пиздо",
@@ -322,31 +326,98 @@ SHORT_BAD = [
     "изобью", "избить",
 ]
 
+# Whitelist — точные нормализованные слова, которые НЕ мат.
+# Расширен специально, чтобы не ловить обычные слова с опасными корнями.
 WHITELIST_RAW = {
-    "херсон", "херсонес", "херсонский",
-    "мандарин", "мандарины", "мандаринка", "мандариновый", "мандаринчик",
-    "анализ", "анализа", "аналитик", "аналитика", "анализировать",
-    "трахея", "трахеит", "трахеи", "трахеотомия",
-    "секстант", "секстанта",
+    # херсон / хер
+    "херсон", "херсонес", "херсонский", "херсонская", "херсонский",
+    "хер", "херов", "херня", "херня", "херню", "херней",
+    # мандарин / манда
+    "мандарин", "мандарины", "мандаринка", "мандаринка",
+    "мандариновый", "мандаринчик", "мандаринчики",
+    # анализ / анал
+    "анализ", "анализа", "анализу", "анализом", "анализе",
+    "аналитик", "аналитика", "аналитики", "аналитику",
+    "анализировать", "анализировал", "анализирую",
+    "аналог", "аналога", "аналогия", "аналогичный", "аналогично",
+    "аналоговый", "аналоговый",
+    # трахея / трах
+    "трахея", "трахеи", "трахею", "трахеей", "трахеит",
+    "трахеотомия", "трахеостомия",
+    # секс / секстант
+    "секстант", "секстанта", "секстанты",
+    "секция", "секции", "секцию", "секций", "секционный",
+    "секрет", "секрета", "секретный", "секретно",
+    "секретарь", "секретариат",
+    # сук / сукаленок
     "сукаленок", "сукаленка",
+    "сукно", "сукна", "сукном", "сукне",
+    "суккулент", "суккуленты",
+    "сукровица",
+    # срак / сракозябра
     "сракозябра", "сракозябры",
-    "моченый", "моченая", "моченые",
-    "оральный", "оральная", "оральное",
-    "половой", "половая", "половое", "половые",
-    "половинка", "половина", "половину",
-    "сношение", "сношения",
-    "дешевка", "дешевки", "дешевле",
-    "соль", "соли", "солью",
-    "фаллос", "фаллоса",
-    "пенис", "пениса",
-    "вагина", "вагины", "вагинальный",
-    "клитор", "клитора",
-    "анальный", "анальная", "анальное",
-    "сексуальный", "сексуальная", "сексуальное", "сексуальность",
-    "мастурбация",
-    "наркотик", "наркотики",
-    "хамство", "хамства",
-    "поганец",
+    # полов / половой
+    "половой", "половая", "половое", "половые", "половых",
+    "половинка", "половина", "половину", "половины",
+    "половник", "половники",
+    # орал / оральный
+    "оральный", "оральная", "оральное", "оральные",
+    "орал", "орала", "орали", "орать", "орал",  # редко, но лучше пропустить
+    # снош / сношение
+    "сношение", "сношения", "сношению", "сношением",
+    "сносно", "сносный", "сносная", "сносное", "сносные",
+    "сноска", "сноски", "сноску",
+    # дешевк / дешевка
+    "дешевка", "дешевки", "дешевке", "дешевку", "дешевкой",
+    "дешевле", "дешевый", "дешевая", "дешево",
+    # соль
+    "соль", "соли", "солью", "солью",
+    "соленый", "соленая", "соленое",
+    "солнечный", "солнечная", "солнце",
+    # анус / анальный
+    "анальный", "анальная", "анальное", "анальные",
+    "анус", "ануса", "анусу", "анусом",
+    # вагина / клитор
+    "вагина", "вагины", "вагине", "вагину", "вагиной",
+    "вагинальный", "вагинальная",
+    "клитор", "клитора", "клиторе", "клитору", "клитором",
+    "клиторальный",
+    # фаллос / пенис
+    "фаллос", "фаллоса", "фаллосу", "фаллосом",
+    "пенис", "пениса", "пенису", "пенисом",
+    "пенистый", "пенистая",
+    # секс / сексуальность
+    "сексуальный", "сексуальная", "сексуальное", "сексуальные",
+    "сексуальность", "сексуально",
+    # мастурбация
+    "мастурбация", "мастурбации", "мастурбацию",
+    # наркотик
+    "наркотик", "наркотики", "наркотика", "наркотиков",
+    "наркоз", "наркоза", "наркозный",
+    # хамство
+    "хамство", "хамства", "хамству", "хамством",
+    # поганец
+    "поганец", "поганка", "поганки",
+    "поганый", "поганая", "поганое", "поганые",
+    # трава / трах
+    "трава", "травы", "траве", "траву", "травой", "травам", "травах",
+    "травинка", "травинки", "травинку",
+    "травля", "травли", "травлю",
+    "травма", "травмы", "травме", "травму", "травмой",
+    "травматолог", "травматология",
+    "траверс", "траверса",
+    "травильный", "травильная",
+    # лупа / луп
+    "лупа", "лупы", "лупе", "лупу", "лупой",
+    "лупить", "луплю", "лупит",
+    # муравей / мурав
+    "муравей", "муравья", "муравью", "муравьи", "муравьёв", "муравьев",
+    "муравьиный", "муравьиная", "муравейник", "муравейника",
+    # сука — оставим но с whitelist форм
+    "сука", "суки", "суке", "суку", "сукой", "сукою",  # добавляем формы
+    # прочие не-матерные
+    "сукно", "сукна",
+    "суккулент", "суккуленты", "суккулентный",
 }
 
 WHITELIST = {normalize(w) for w in WHITELIST_RAW}
@@ -354,9 +425,11 @@ WHITELIST = {normalize(w) for w in WHITELIST_RAW}
 
 def has_bad_words(text: str) -> bool:
     """
-    - Длинные корни (≥5 букв) — подстрока в тексте.
-    - Короткие корни (≤4 буквы) — только как отдельные слова.
-    - Whitelist — точное совпадение.
+    Логика:
+    1. Если текст — точное whitelist-слово → не мат
+    2. Длинные корни — подстрокой в тексте
+    3. Короткие корни — как отдельные слова
+    4. Склеенный текст — для обходов
     """
     if not text:
         return False
@@ -369,21 +442,20 @@ def has_bad_words(text: str) -> bool:
     if flat in WHITELIST:
         return False
 
-    # Длинные — подстрокой
+    # Длинные — подстрокой в тексте
     for bad in LONG_BAD:
         if bad in flat:
             return True
 
-    # Короткие — как отдельное слово
+    # Короткие — как отдельные слова
     norm_set = set(norm_words)
     for bad in SHORT_BAD:
         if bad in norm_set:
             return True
 
-    # Склеенный текст — для обходов "б л я т ь"
+    # Склеенный — для обходов "б л я т ь"
     for bad in SHORT_BAD:
         if len(bad) >= 3 and bad in flat:
-            # проверим, что каждое слово не whitelist'овое
             if all(w in WHITELIST for w in norm_words):
                 continue
             return True
@@ -454,15 +526,25 @@ def is_service_message(message: types.Message) -> bool:
 # ==================== КЭШ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 def cache_user(chat_id: int, user: types.User):
-    if not user or not user.username:
+    """Запоминает username и display_name для чата."""
+    if not user:
         return
-    USERNAME_CACHE.setdefault(chat_id, {})[user.username.lower()] = user.id
+    if user.username:
+        USERNAME_CACHE.setdefault(chat_id, {})[user.username.lower()] = user.id
+    USER_ID_TO_NAME[(chat_id, user.id)] = user.full_name
 
 
 def resolve_username(chat_id: int, username: str):
+    """Ищет user_id по @username в кэше (без @)."""
     if not username:
         return None
-    return USERNAME_CACHE.get(chat_id, {}).get(username.lstrip("@").lower())
+    uname = username.lstrip("@").lower()
+    return USERNAME_CACHE.get(chat_id, {}).get(uname)
+
+
+def get_name(chat_id: int, user_id: int) -> str:
+    """Возвращает display_name по user_id (или ID, если не знаем)."""
+    return USER_ID_TO_NAME.get((chat_id, user_id), f"ID {user_id}")
 
 
 def extract_username_from_text(text: str):
@@ -480,68 +562,57 @@ def extract_user_id_from_text(text: str):
 
 
 async def resolve_target(message: types.Message):
+    """Возвращает (user_id, display_name, error)."""
+    chat_id = message.chat.id
+
+    # 1) reply
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
-        cache_user(message.chat.id, u)
+        cache_user(chat_id, u)
         return u.id, u.full_name, None
 
     text = message.text or ""
 
+    # 2) entities: text_mention или mention
     if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
                 u = entity.user
-                cache_user(message.chat.id, u)
+                cache_user(chat_id, u)
                 return u.id, u.full_name, None
             if entity.type == "mention":
                 username = text[entity.offset:entity.offset + entity.length]
-                uid = resolve_username(message.chat.id, username)
+                uid = resolve_username(chat_id, username)
                 if uid:
-                    return uid, username, None
+                    return uid, get_name(chat_id, uid), None
                 return None, username, (
-                    "❌ Не удалось определить ID по @username. "
-                    "Используй reply или числовой ID."
+                    f"❌ Не удалось найти <code>{username}</code>.\n"
+                    "Пользователь должен хоть раз написать в этом чате.\n"
+                    "Или используй reply / числовой ID."
                 )
 
+    # 3) @username в тексте
     username = extract_username_from_text(text)
     if username:
-        uid = resolve_username(message.chat.id, username)
+        uid = resolve_username(chat_id, username)
         if uid:
-            return uid, username, None
+            return uid, get_name(chat_id, uid), None
         return None, username, (
-            f"❌ Не удалось найти <code>{username}</code> в кэше чата."
+            f"❌ Не удалось найти <code>{username}</code> в кэше чата.\n"
+            "Пользователь должен хоть раз написать сообщение."
         )
 
+    # 4) числовой ID
     uid = extract_user_id_from_text(text)
     if uid:
         return uid, f"ID {uid}", None
 
-    return None, None, "❌ Укажи пользователя (reply, @username или ID)."
-
-
-def extract_target_user(message: types.Message):
-    if message.reply_to_message and message.reply_to_message.from_user:
-        u = message.reply_to_message.from_user
-        return u.id, u.full_name
-    text = message.text or ""
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention" and entity.user:
-                u = entity.user
-                return u.id, u.full_name
-            if entity.type == "mention":
-                username = text[entity.offset:entity.offset + entity.length]
-                uid = resolve_username(message.chat.id, username)
-                if uid:
-                    return uid, username
-                return None, username
-    username = extract_username_from_text(text)
-    if username:
-        uid = resolve_username(message.chat.id, username)
-        if uid:
-            return uid, username
-        return None, username
-    return None, None
+    return None, None, (
+        "❌ Укажи пользователя:\n"
+        "• ответь (reply) на его сообщение\n"
+        "• укажи @username (если писал в чате)\n"
+        "• укажи числовой ID"
+    )
 
 
 # ==================== УТИЛИТЫ ====================
@@ -568,14 +639,6 @@ async def is_target_admin(message: types.Message, target_id: int) -> bool:
         return False
 
 
-async def is_target_bot(message: types.Message, target_id: int) -> bool:
-    try:
-        me = await bot.get_me()
-        return target_id == me.id
-    except Exception:
-        return False
-
-
 async def bot_can_restrict(message: types.Message) -> bool:
     try:
         me = await bot.get_me()
@@ -583,18 +646,6 @@ async def bot_can_restrict(message: types.Message) -> bool:
         return bool(getattr(member, "can_restrict_members", False))
     except Exception as e:
         logging.warning(f"bot_can_restrict: {e}")
-        return False
-
-
-async def bot_can_delete(message: types.Message) -> bool:
-    if message.chat.type == ChatType.PRIVATE:
-        return False
-    try:
-        me = await bot.get_me()
-        member = await bot.get_chat_member(message.chat.id, me.id)
-        return bool(getattr(member, "can_delete_messages", False))
-    except Exception as e:
-        logging.warning(f"bot_can_delete: {e}")
         return False
 
 
@@ -608,7 +659,7 @@ def parse_minutes(args):
 
 
 async def check_target(message: types.Message, user_id: int, name: str) -> bool:
-    if await is_target_bot(message, user_id):
+    if user_id == BOT_ID:
         await message.reply("🤖 Нельзя наказывать самого бота.")
         return False
     if await is_target_admin(message, user_id):
@@ -642,7 +693,7 @@ async def cmd_help(message: types.Message):
         "🎲 <b>Развлечения (для всех):</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• /rps — КНБ с ботом\n"
-        "• /rps @user или reply — КНБ с участником\n"
+        "• /rps @user или reply — КНБ с участником (с его согласия)\n"
         "• /dice — бросить кубик (1–6)\n"
         "• /coin — орёл или решка\n"
         "• /ball &lt;вопрос&gt; — магический шар\n\n"
@@ -657,7 +708,7 @@ async def cmd_help(message: types.Message):
         "• /delete — удалить сообщение (reply)\n\n"
         "<b>Наказания:</b>\n"
         "• /kick — кикнуть (@user или reply)\n"
-        "• /ban — забанить навсегда (@user или reply)\n"
+        "• /ban — забанить навсегда\n"
         "• /unban — разбанить (@user или ID)\n"
         "• /tempban &lt;мин&gt; — временный бан\n"
         "• /mute &lt;мин&gt; — мут (заглушить)\n"
@@ -745,12 +796,10 @@ async def cmd_everyone(message: types.Message):
     chat_id = message.chat.id
     user_ids = set()
 
-    # 1) все из кэша
     cached = USERNAME_CACHE.get(chat_id, {})
     for uid in cached.values():
         user_ids.add(uid)
 
-    # 2) админы
     try:
         admins = await bot.get_chat_administrators(chat_id)
         for admin in admins:
@@ -759,10 +808,8 @@ async def cmd_everyone(message: types.Message):
     except Exception as e:
         logging.warning(f"get_chat_administrators: {e}")
 
-    # 3) автор
     user_ids.add(message.from_user.id)
 
-    # фильтруем ботов и вышедших
     real_ids = []
     for uid in user_ids:
         try:
@@ -779,7 +826,6 @@ async def cmd_everyone(message: types.Message):
         await message.answer("⚠️ Не удалось собрать участников.")
         return
 
-    # Невидимые упоминания — компактно, через один пробел
     mentions = " ".join(
         f'<a href="tg://user?id={uid}">\u200b</a>' for uid in real_ids[:40]
     )
@@ -824,7 +870,7 @@ async def cmd_delete(message: types.Message):
         logging.warning(f"delete cmd: {e}")
 
 
-# ==================== КНБ ====================
+# ==================== КНБ с приглашением ====================
 
 RPS_CHOICES = {"rock": "✊ Камень", "scissors": "✌️ Ножницы", "paper": "✋ Бумага"}
 RPS_BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
@@ -846,6 +892,13 @@ def rps_keyboard(game_id):
     ]])
 
 
+def rps_invite_keyboard(invite_id):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"rpsi:{invite_id}:yes"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rpsi:{invite_id}:no"),
+    ]])
+
+
 def make_game_id(chat_id, user_id):
     return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
 
@@ -853,22 +906,25 @@ def make_game_id(chat_id, user_id):
 @dp.message(Command("rps"))
 @dp.message(Command("кнб"))
 async def cmd_rps(message: types.Message):
-    target_id, target_name = extract_target_user(message)
-
-    if target_id is None and target_name:
-        await message.reply(f"❌ Не нашёл <code>{target_name}</code>. Ответь reply.")
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply("❌ Только в группах.")
         return
 
+    cache_user(message.chat.id, message.from_user)
+
+    target_id, target_name, _ = await resolve_target_for_rps(message)
+
+    # Игра с ботом
     if target_id is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
         RPS_GAMES[game_id] = {
-            "player_a": message.from_user.id, "player_b": None,
+            "player_a": message.from_user.id, "player_b": BOT_ID,
             "choice_a": None, "choice_b": bot_choice_key,
             "is_bot": True,
             "a_name": message.from_user.full_name,
             "a_mention": message.from_user.mention_html(),
-            "b_name": "🤖", "b_mention": "🤖",
+            "b_name": "🤖 Бот", "b_mention": "🤖 Бот",
             "chat_id": message.chat.id,
         }
         await message.answer(
@@ -878,112 +934,216 @@ async def cmd_rps(message: types.Message):
         return
 
     if target_id == message.from_user.id:
-        await message.reply("❌ Нельзя с самим собой.")
+        await message.reply("❌ Нельзя играть с самим собой.")
         return
 
-    me = await bot.get_me()
-    if target_id == me.id:
-        await message.reply("🤖 Напиши /rps без аргументов.")
+    if target_id == BOT_ID:
+        await message.reply("🤖 Чтобы сыграть со мной, напиши /rps без аргументов.")
         return
 
-    game_id = make_game_id(message.chat.id, message.from_user.id)
-    target_mention = f'<a href="tg://user?id={target_id}">{target_name}</a>'
-    RPS_GAMES[game_id] = {
-        "player_a": message.from_user.id, "player_b": target_id,
-        "choice_a": None, "choice_b": None, "is_bot": False,
-        "a_name": message.from_user.full_name,
-        "a_mention": message.from_user.mention_html(),
-        "b_name": target_name, "b_mention": target_mention,
+    # PvP — приглашение
+    invite_id = f"{message.chat.id}_{random.randint(1000000, 9999999)}"
+    RPS_INVITES[invite_id] = {
         "chat_id": message.chat.id,
+        "from_id": message.from_user.id,
+        "from_name": message.from_user.full_name,
+        "from_mention": message.from_user.mention_html(),
+        "to_id": target_id,
+        "to_name": target_name,
     }
-    await message.answer(
-        f"🎮 <b>КНБ!</b>\n\n🥊 {message.from_user.mention_html()} vs {target_mention}\n\n"
-        f"👉 <b>{message.from_user.full_name}</b>, ход:",
-        reply_markup=rps_keyboard(game_id)
-    )
+
+    try:
+        await message.answer(
+            f"🎮 <b>Вызов на КНБ!</b>\n\n"
+            f"👤 {message.from_user.mention_html()} приглашает "
+            f"<a href=\"tg://user?id={target_id}\">{target_name}</a>\n\n"
+            f"Ожидаю ответа...",
+            reply_markup=rps_invite_keyboard(invite_id)
+        )
+    except Exception as e:
+        await message.reply(f"❌ {e}")
+
+
+async def resolve_target_for_rps(message: types.Message):
+    """Отдельная логика — принимает reply, @username (из entities) или @username из кэша."""
+    chat_id = message.chat.id
+
+    # reply
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        cache_user(chat_id, u)
+        return u.id, u.full_name, None
+
+    text = message.text or ""
+
+    # entity mention / text_mention
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                u = entity.user
+                cache_user(chat_id, u)
+                return u.id, u.full_name, None
+            if entity.type == "mention":
+                username = text[entity.offset:entity.offset + entity.length]
+                uid = resolve_username(chat_id, username)
+                if uid:
+                    return uid, get_name(chat_id, uid), None
+                return None, None, None
+
+    username = extract_username_from_text(text)
+    if username:
+        uid = resolve_username(chat_id, username)
+        if uid:
+            return uid, get_name(chat_id, uid), None
+
+    return None, None, None
 
 
 @dp.callback_query()
 async def rps_callback(call: CallbackQuery):
-    if not call.data.startswith("rps:"):
-        await call.answer()
-        return
-
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer("Ошибка.", show_alert=True)
-        return
-
-    _, game_id, choice = parts
-    game = RPS_GAMES.get(game_id)
-    if not game:
-        await call.answer("Игра не найдена.", show_alert=True)
-        return
-
-    user_id = call.from_user.id
-
-    if game["is_bot"]:
-        if user_id != game["player_a"]:
-            await call.answer("Не твоя игра.", show_alert=True)
+    # ---- приглашение ----
+    if call.data.startswith("rpsi:"):
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка.", show_alert=True)
             return
-        bot_choice = game["choice_b"]
-        result = rps_result(choice, bot_choice)
-        if result == "draw":
-            verdict = "🤝 Ничья!"
-        elif result == "a":
-            verdict = f"🎉 Победил {game['a_name']}!"
-        else:
-            verdict = "😢 Победил бот!"
+        _, invite_id, action = parts
+        invite = RPS_INVITES.get(invite_id)
+        if not invite:
+            await call.answer("Приглашение не найдено.", show_alert=True)
+            return
+
+        # отвечать может только приглашённый
+        if call.from_user.id != invite["to_id"]:
+            await call.answer("Это приглашение не тебе.", show_alert=True)
+            return
+
+        if action == "no":
+            try:
+                await call.message.edit_text(
+                    f"🎮 <b>КНБ</b>\n\n"
+                    f"❌ <a href=\"tg://user?id={invite['to_id']}\">{invite['to_name']}</a> "
+                    f"отклонил приглашение от {invite['from_mention']}."
+                )
+            except Exception:
+                pass
+            await call.answer("Отклонено.")
+            RPS_INVITES.pop(invite_id, None)
+            return
+
+        # accept
+        await call.answer("Принято!")
+        game_id = make_game_id(invite["chat_id"], invite["from_id"])
+        RPS_GAMES[game_id] = {
+            "player_a": invite["from_id"],
+            "player_b": invite["to_id"],
+            "choice_a": None,
+            "choice_b": None,
+            "is_bot": False,
+            "a_name": invite["from_name"],
+            "a_mention": invite["from_mention"],
+            "b_name": invite["to_name"],
+            "b_mention": f'<a href="tg://user?id={invite["to_id"]}">{invite["to_name"]}</a>',
+            "chat_id": invite["chat_id"],
+        }
         try:
             await call.message.edit_text(
-                f"🎮 <b>КНБ</b>\n\n👤 {RPS_CHOICES[choice]}\n🤖 {RPS_CHOICES[bot_choice]}\n\n<b>{verdict}</b>"
+                f"🎮 <b>КНБ!</b>\n\n"
+                f"🥊 {invite['from_mention']} vs "
+                f"<a href=\"tg://user?id={invite['to_id']}\">{invite['to_name']}</a>\n\n"
+                f"👉 <b>{invite['from_name']}</b>, выбери свой ход первым:",
+                reply_markup=rps_keyboard(game_id)
             )
         except Exception:
             pass
-        await call.answer()
-        RPS_GAMES.pop(game_id, None)
+        RPS_INVITES.pop(invite_id, None)
         return
 
-    slot = "a" if user_id == game["player_a"] else ("b" if user_id == game["player_b"] else None)
-    if slot is None:
-        await call.answer("Не участник.", show_alert=True)
-        return
+    # ---- сама игра ----
+    if call.data.startswith("rps:"):
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка.", show_alert=True)
+            return
 
-    if game.get(f"choice_{slot}") is not None:
-        await call.answer("Уже выбрал!", show_alert=True)
-        return
+        _, game_id, choice = parts
+        game = RPS_GAMES.get(game_id)
+        if not game:
+            await call.answer("Игра не найдена.", show_alert=True)
+            return
 
-    game[f"choice_{slot}"] = choice
-    await call.answer(f"Выбрал: {RPS_CHOICES[choice]}")
+        user_id = call.from_user.id
 
-    if game["choice_a"] is not None and game["choice_b"] is not None:
-        ca, cb = game["choice_a"], game["choice_b"]
-        result = rps_result(ca, cb)
-        if result == "draw":
-            verdict = "🤝 Ничья!"
-        elif result == "a":
-            verdict = f"🏆 Победил {game['a_mention']}!"
-        else:
-            verdict = f"🏆 Победил {game['b_mention']}!"
+        if game["is_bot"]:
+            if user_id != game["player_a"]:
+                await call.answer("Не твоя игра.", show_alert=True)
+                return
+            bot_choice = game["choice_b"]
+            result = rps_result(choice, bot_choice)
+            if result == "draw":
+                verdict = "🤝 Ничья!"
+            elif result == "a":
+                verdict = f"🎉 Победил {game['a_name']}!"
+            else:
+                verdict = "😢 Победил бот!"
+            try:
+                await call.message.edit_text(
+                    f"🎮 <b>КНБ</b>\n\n"
+                    f"👤 {RPS_CHOICES[choice]}\n🤖 {RPS_CHOICES[bot_choice]}\n\n"
+                    f"<b>{verdict}</b>"
+                )
+            except Exception:
+                pass
+            await call.answer()
+            RPS_GAMES.pop(game_id, None)
+            return
+
+        slot = "a" if user_id == game["player_a"] else ("b" if user_id == game["player_b"] else None)
+        if slot is None:
+            await call.answer("Не участник.", show_alert=True)
+            return
+
+        if game.get(f"choice_{slot}") is not None:
+            await call.answer("Уже выбрал!", show_alert=True)
+            return
+
+        game[f"choice_{slot}"] = choice
+        await call.answer(f"Выбрал: {RPS_CHOICES[choice]}")
+
+        if game["choice_a"] is not None and game["choice_b"] is not None:
+            ca, cb = game["choice_a"], game["choice_b"]
+            result = rps_result(ca, cb)
+            if result == "draw":
+                verdict = "🤝 Ничья!"
+            elif result == "a":
+                verdict = f"🏆 Победил {game['a_mention']}!"
+            else:
+                verdict = f"🏆 Победил {game['b_mention']}!"
+            try:
+                await call.message.edit_text(
+                    f"🎮 <b>КНБ результат</b>\n\n"
+                    f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
+                    f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n"
+                    f"<b>{verdict}</b>"
+                )
+            except Exception:
+                pass
+            RPS_GAMES.pop(game_id, None)
+            return
+
+        next_name = game["b_mention"] if game["choice_a"] is not None else game["a_mention"]
         try:
             await call.message.edit_text(
-                f"🎮 <b>КНБ результат</b>\n\n"
-                f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
-                f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n<b>{verdict}</b>"
+                f"🎮 <b>КНБ</b>\n\n"
+                f"🥊 {game['a_mention']} vs {game['b_mention']}\n\n"
+                f"👉 Ход: {next_name}",
+                reply_markup=rps_keyboard(game_id)
             )
         except Exception:
             pass
-        RPS_GAMES.pop(game_id, None)
         return
 
-    next_name = game["b_mention"] if game["choice_a"] is not None else game["a_mention"]
-    try:
-        await call.message.edit_text(
-            f"🎮 <b>КНБ</b>\n\n🥊 {game['a_mention']} vs {game['b_mention']}\n\n👉 Ход: {next_name}",
-            reply_markup=rps_keyboard(game_id)
-        )
-    except Exception:
-        pass
+    await call.answer()
 
 
 # ==================== РАЗВЛЕКАТЕЛЬНЫЕ ====================
@@ -1169,6 +1329,7 @@ async def cmd_unmute(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
+    # Кэширование
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1231,11 +1392,16 @@ async def set_commands():
 # ==================== ЗАПУСК ====================
 
 async def main():
+    global BOT_ID
     logging.info("Запуск бота...")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
         logging.warning(f"delete_webhook: {e}")
+
+    me = await bot.get_me()
+    BOT_ID = me.id
+    logging.info(f"Бот: @{me.username} (id={BOT_ID})")
 
     await set_commands()
     logging.info("Бот запущен, начинаю polling...")
