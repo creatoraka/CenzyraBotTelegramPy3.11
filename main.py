@@ -419,6 +419,27 @@ async def is_admin(message: types.Message) -> bool:
         return False
 
 
+async def is_target_admin(message: types.Message, target_id: int) -> bool:
+    """Проверяет, является ли цель админом или владельцем чата."""
+    if message.chat.type == ChatType.PRIVATE:
+        return False
+    try:
+        member = await bot.get_chat_member(message.chat.id, target_id)
+        return member.status in ("administrator", "creator")
+    except Exception as e:
+        logging.warning(f"is_target_admin: {e}")
+        return False
+
+
+async def is_target_bot(message: types.Message, target_id: int) -> bool:
+    """Проверяет, является ли цель самим ботом."""
+    try:
+        me = await bot.get_me()
+        return target_id == me.id
+    except Exception:
+        return False
+
+
 async def bot_can_restrict(message: types.Message) -> bool:
     try:
         me = await bot.get_me()
@@ -438,6 +459,23 @@ def parse_minutes(args: list[str]) -> int | None:
     return None
 
 
+async def check_target(message: types.Message, user_id: int, name: str) -> bool:
+    """
+    Общая проверка цели для модерации.
+    Возвращает True, если цель можно наказывать.
+    """
+    if await is_target_bot(message, user_id):
+        await message.reply("🤖 Нельзя наказывать самого бота.")
+        return False
+    if await is_target_admin(message, user_id):
+        await message.reply(
+            f"🛡 <b>{name}</b> — админ/владелец чата. "
+            f"Его нельзя наказать этой командой."
+        )
+        return False
+    return True
+
+
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -452,13 +490,13 @@ async def cmd_start(message: types.Message):
 
 
 @dp.message(Command("help"))
-@dp.message(Command("помощь"))  # русский алиас (в меню не виден, но работает)
+@dp.message(Command("помощь"))
 async def cmd_help(message: types.Message):
     await message.answer(
         "🛡 <b>Бот-цензор</b>\n\n"
         "<b>🎲 Развлечения:</b>\n"
-        "/rps — камень-ножницы-бумага с ботом\n"
-        "/rps @user — игра с другим участником (PvP)\n"
+        "/rps — КНБ с ботом\n"
+        "/rps @user или reply — КНБ с другим участником\n"
         "/dice — бросить кубик (1–6)\n"
         "/coin — орёл или решка\n"
         "/title — выдать смешной титул (себе или reply)\n"
@@ -469,12 +507,12 @@ async def cmd_help(message: types.Message):
         "/tempban &lt;мин&gt; — временный бан (reply)\n"
         "/mute &lt;мин&gt; — замутить (reply)\n"
         "/unmute — снять мут (reply)\n\n"
-        "💡 <i>Команды модерации работают через reply на сообщение нарушителя.</i>\n"
+        "🛡 <i>Админов и владельца чата наказать нельзя.</i>\n"
         "🇷🇺 <i>Русские алиасы тоже работают: /кнб /кубик /монетка /титул /шар /кик /бан /врембан /мут /размут</i>"
     )
 
 
-# ==================== РАЗВЛЕКАТЕЛЬНЫЕ ====================
+# ==================== КНБ ====================
 
 RPS_CHOICES = {
     "rock": "✊ Камень",
@@ -498,6 +536,8 @@ def rps_result(a: str, b: str) -> str:
 
 
 def rps_keyboard(game_id: str) -> InlineKeyboardMarkup:
+    # ВАЖНО: game_id должен содержать только цифры/подчёркивания,
+    # потому что callback_data парсится по ":".
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✊ Камень", callback_data=f"rps:{game_id}:rock"),
         InlineKeyboardButton(text="✌️ Ножницы", callback_data=f"rps:{game_id}:scissors"),
@@ -505,39 +545,62 @@ def rps_keyboard(game_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def make_game_id(chat_id: int, user_id: int) -> str:
+    """Только цифры и подчёркивания — безопасно для callback_data."""
+    return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
+
+
 @dp.message(Command("rps"))
 @dp.message(Command("кнб"))
 async def cmd_rps(message: types.Message):
-    args = (message.text or "").split()
     target_id, target_name = extract_target_user(message)
 
-    # Если нет цели — игра с ботом
+    # Игра с ботом
     if target_id is None and target_name is None:
-        # Если в args есть @username, но text_mention не сработал
+        game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
-        await message.answer(
-            f"🤖 Играем с ботом!\n\n"
-            f"Мой выбор уже сделан. Нажми свою кнопку:",
-            reply_markup=rps_keyboard("bot")
-        )
-        # Сохраняем выбор бота для игры с ботом
-        RPS_GAMES[f"bot:{message.chat.id}:{message.from_user.id}"] = {
+        RPS_GAMES[game_id] = {
             "player_a": message.from_user.id,
+            "player_b": None,
             "choice_a": None,
             "choice_b": bot_choice_key,
             "is_bot": True,
             "a_name": message.from_user.full_name,
+            "a_mention": message.from_user.mention_html(),
             "b_name": "🤖 Бот",
+            "b_mention": "🤖 Бот",
+            "chat_id": message.chat.id,
         }
+        await message.answer(
+            "🎮 <b>КНБ с ботом</b>\n\n"
+            f"👤 {message.from_user.mention_html()}, твой ход:",
+            reply_markup=rps_keyboard(game_id)
+        )
         return
 
-    # Если цель — сам автор
+    # Цель — сам автор
     if target_id == message.from_user.id:
         await message.reply("❌ Нельзя играть с самим собой.")
         return
 
-    # Создаём PvP игру
-    game_id = f"{message.chat.id}:{message.from_user.id}:{random.randint(1000, 9999)}"
+    # Цель — бот
+    me = await bot.get_me()
+    if target_id == me.id:
+        await message.reply("🤖 Чтобы сыграть со мной, напиши просто /rps без аргументов.")
+        return
+
+    # Если только @username без id — не можем создать PvP надёжно
+    if target_id is None:
+        await message.reply(
+            "❌ Не удалось определить пользователя.\n"
+            "Ответь (reply) на его сообщение и напиши /rps."
+        )
+        return
+
+    # PvP
+    game_id = make_game_id(message.chat.id, message.from_user.id)
+    target_mention = f'<a href="tg://user?id={target_id}">{target_name}</a>'
+
     RPS_GAMES[game_id] = {
         "player_a": message.from_user.id,
         "player_b": target_id,
@@ -545,13 +608,16 @@ async def cmd_rps(message: types.Message):
         "choice_b": None,
         "is_bot": False,
         "a_name": message.from_user.full_name,
-        "b_name": target_name or "Соперник",
+        "a_mention": message.from_user.mention_html(),
+        "b_name": target_name,
+        "b_mention": target_mention,
+        "chat_id": message.chat.id,
     }
 
     await message.answer(
         f"🎮 <b>Вызов на КНБ!</b>\n\n"
-        f"🥊 {message.from_user.mention_html()} vs {target_name or 'Соперник'}\n\n"
-        f"Игрок 1, выбери свой ход:",
+        f"🥊 {message.from_user.mention_html()} vs {target_mention}\n\n"
+        f"👉 <b>{message.from_user.full_name}</b>, выбери свой ход первым:",
         reply_markup=rps_keyboard(game_id)
     )
 
@@ -560,20 +626,20 @@ async def cmd_rps(message: types.Message):
 async def rps_callback(call: CallbackQuery):
     parts = call.data.split(":")
     if len(parts) != 3:
-        await call.answer("Некорректный вызов.")
+        await call.answer("Некорректный вызов.", show_alert=True)
         return
 
     _, game_id, choice = parts
+    game = RPS_GAMES.get(game_id)
+    if not game:
+        await call.answer("Игра не найдена или уже завершена.", show_alert=True)
+        return
 
-    # Игра с ботом
-    if game_id == "bot":
-        # Ключ: bot:{chat_id}:{user_id}
-        key = f"bot:{call.message.chat.id}:{call.from_user.id}"
-        game = RPS_GAMES.get(key)
-        if not game:
-            await call.answer("Игра не найдена. Начни заново: /rps")
-            return
-        if game["player_a"] != call.from_user.id:
+    user_id = call.from_user.id
+
+    # ===== Игра с ботом =====
+    if game["is_bot"]:
+        if user_id != game["player_a"]:
             await call.answer("Эта игра не твоя.", show_alert=True)
             return
 
@@ -584,27 +650,24 @@ async def rps_callback(call: CallbackQuery):
         if result == "draw":
             verdict = "🤝 Ничья!"
         elif result == "a":
-            verdict = "🎉 Ты победил!"
+            verdict = f"🎉 Победил {game['a_name']}!"
         else:
-            verdict = "😢 Бот победил!"
+            verdict = "😢 Победил бот!"
 
-        await call.message.edit_text(
-            f"🎮 <b>КНБ с ботом</b>\n\n"
-            f"👤 Ты: {RPS_CHOICES[player_choice]}\n"
-            f"🤖 Бот: {RPS_CHOICES[bot_choice]}\n\n"
-            f"<b>{verdict}</b>"
-        )
+        try:
+            await call.message.edit_text(
+                f"🎮 <b>КНБ с ботом</b>\n\n"
+                f"👤 {game['a_mention']}: {RPS_CHOICES[player_choice]}\n"
+                f"🤖 Бот: {RPS_CHOICES[bot_choice]}\n\n"
+                f"<b>{verdict}</b>"
+            )
+        except Exception:
+            pass
         await call.answer()
-        RPS_GAMES.pop(key, None)
+        RPS_GAMES.pop(game_id, None)
         return
 
-    # PvP игра
-    game = RPS_GAMES.get(game_id)
-    if not game:
-        await call.answer("Игра не найдена или уже завершена.", show_alert=True)
-        return
-
-    user_id = call.from_user.id
+    # ===== PvP =====
     if user_id == game["player_a"]:
         slot = "a"
     elif user_id == game["player_b"]:
@@ -620,42 +683,49 @@ async def rps_callback(call: CallbackQuery):
     game[f"choice_{slot}"] = choice
     await call.answer(f"Ты выбрал: {RPS_CHOICES[choice]}")
 
-    # Если оба сделали выбор — показываем результат
+    # Оба сделали выбор
     if game["choice_a"] is not None and game["choice_b"] is not None:
-        ca = game["choice_a"]
-        cb = game["choice_b"]
+        ca, cb = game["choice_a"], game["choice_b"]
         result = rps_result(ca, cb)
 
         if result == "draw":
             verdict = "🤝 Ничья!"
         elif result == "a":
-            verdict = f"🏆 Победил {game['a_name']}!"
+            verdict = f"🏆 Победил {game['a_mention']}!"
         else:
-            verdict = f"🏆 Победил {game['b_name']}!"
+            verdict = f"🏆 Победил {game['b_mention']}!"
 
+        text = (
+            f"🎮 <b>КНБ — результат</b>\n\n"
+            f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
+            f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n"
+            f"<b>{verdict}</b>"
+        )
         try:
-            await call.message.edit_text(
-                f"🎮 <b>КНБ — результат</b>\n\n"
-                f"👤 {game['a_name']}: {RPS_CHOICES[ca]}\n"
-                f"👤 {game['b_name']}: {RPS_CHOICES[cb]}\n\n"
-                f"<b>{verdict}</b>"
-            )
+            await call.message.edit_text(text)
         except Exception:
-            await call.message.answer(
-                f"🎮 <b>КНБ — результат</b>\n\n"
-                f"👤 {game['a_name']}: {RPS_CHOICES[ca]}\n"
-                f"👤 {game['b_name']}: {RPS_CHOICES[cb]}\n\n"
-                f"<b>{verdict}</b>"
-            )
+            await call.message.answer(text)
         RPS_GAMES.pop(game_id, None)
+        return
+
+    # Один сделал выбор — ждём второго
+    if game["choice_a"] is not None:
+        next_name = game["b_mention"]
     else:
-        # Один сделал выбор — ждём второго
+        next_name = game["a_mention"]
+
+    try:
         await call.message.edit_text(
             f"🎮 <b>КНБ</b>\n\n"
-            f"{game['a_name']} vs {game['b_name']}\n\n"
-            f"Ожидание второго игрока..."
+            f"🥊 {game['a_mention']} vs {game['b_mention']}\n\n"
+            f"👉 Теперь ход: {next_name}",
+            reply_markup=rps_keyboard(game_id)
         )
+    except Exception:
+        pass
 
+
+# ==================== ПРОЧИЕ РАЗВЛЕКАТЕЛЬНЫЕ ====================
 
 @dp.message(Command("dice"))
 @dp.message(Command("кубик"))
@@ -719,6 +789,9 @@ async def cmd_kick(message: types.Message):
         await message.reply("❌ Ответь (reply) на сообщение пользователя.")
         return
 
+    if not await check_target(message, user_id, name):
+        return
+
     try:
         await bot.ban_chat_member(message.chat.id, user_id)
         await bot.unban_chat_member(message.chat.id, user_id)
@@ -742,6 +815,9 @@ async def cmd_ban(message: types.Message):
         await message.reply("❌ Ответь (reply) на сообщение пользователя.")
         return
 
+    if not await check_target(message, user_id, name):
+        return
+
     try:
         await bot.ban_chat_member(message.chat.id, user_id)
         await message.answer(f"🔨 {name} забанен навсегда.")
@@ -762,6 +838,9 @@ async def cmd_tempban(message: types.Message):
     user_id, name = extract_target_user(message)
     if user_id is None:
         await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+        return
+
+    if not await check_target(message, user_id, name):
         return
 
     args = (message.text or "").split()
@@ -794,6 +873,9 @@ async def cmd_mute(message: types.Message):
     user_id, name = extract_target_user(message)
     if user_id is None:
         await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+        return
+
+    if not await check_target(message, user_id, name):
         return
 
     args = (message.text or "").split()
@@ -879,11 +961,6 @@ async def filter_messages(message: types.Message):
 # ==================== РЕГИСТРАЦИЯ КОМАНД ====================
 
 async def set_commands():
-    """
-    ВАЖНО: Telegram показывает в меню только латинские команды
-    (a-z, 0-9, _). Русские алиасы работают, но в меню не видны.
-    Поэтому здесь только латиница.
-    """
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
         types.BotCommand(command="help", description="Все команды бота"),
@@ -894,8 +971,8 @@ async def set_commands():
         types.BotCommand(command="ball", description="Магический шар"),
         types.BotCommand(command="kick", description="Кикнуть (reply)"),
         types.BotCommand(command="ban", description="Забанить (reply)"),
-        types.BotCommand(command="tempban", description="Врембан в минутах (reply)"),
-        types.BotCommand(command="mute", description="Мут в минутах (reply)"),
+        types.BotCommand(command="tempban", description="Врембан (reply)"),
+        types.BotCommand(command="mute", description="Мут (reply)"),
         types.BotCommand(command="unmute", description="Снять мут (reply)"),
     ]
     try:
