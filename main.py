@@ -6,14 +6,13 @@ import logging
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.enums import ParseMode, ChatType
+from aiogram.enums import ParseMode, ChatType, ChatPermissions
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 # ==================== КОНФИГ ====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения BOT_TOKEN")
 
@@ -22,10 +21,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 TEMP_BANS = {}
@@ -33,358 +29,157 @@ TEMP_MUTES = {}
 RPS_GAMES = {}
 CENSOR_ENABLED = {}
 USERNAME_CACHE = {}
-# Хранилище статуса автоудаления сервисных сообщений: {chat_id: True/False}
 SERVICE_CLEANER_ENABLED = {}
 
 # ==================== НОРМАЛИЗАЦИЯ ====================
 
 HOMOGLYPHS = str.maketrans({
-    "a": "а", "A": "а", "e": "е", "E": "е",
-    "o": "о", "O": "о", "p": "р", "P": "р",
-    "c": "с", "C": "с", "x": "х", "X": "х",
-    "y": "у", "Y": "у", "k": "к", "K": "к",
-    "m": "м", "M": "м", "t": "т", "T": "т",
-    "h": "н", "H": "н", "b": "в", "B": "в",
-    "n": "п", "N": "п",
-    "0": "о", "1": "и", "3": "з", "4": "а",
-    "6": "б", "8": "в", "9": "д",
+    "a": "а", "e": "е", "o": "о", "p": "р", "c": "с",
+    "x": "х", "y": "у", "k": "к", "m": "м", "t": "т",
+    "h": "н", "b": "в", "n": "п",
+    "0": "о", "1": "и", "3": "з", "4": "а", "6": "б", "8": "в", "9": "д",
 })
 
-RU_LETTERS_RE = re.compile(r"[^а-яё]")
+NOT_LETTERS = re.compile(r"[^а-я]")
 
 
-def normalize_word(word: str) -> str:
-    if not word:
-        return ""
-    word = word.lower()
-    word = word.translate(HOMOGLYPHS)
-    word = RU_LETTERS_RE.sub("", word)
-    word = re.sub(r"(.)\1{2,}", r"\1", word)
-    return word
-
-
-def normalize_flat(text: str) -> str:
+def normalize(text: str) -> str:
+    """Lower, гомоглифы→рус, только буквы, сжимаем все повторы."""
     if not text:
         return ""
     text = text.lower()
+    text = text.replace("ё", "е")
     text = text.translate(HOMOGLYPHS)
-    text = RU_LETTERS_RE.sub("", text)
-    text = re.sub(r"(.)\1{2,}", r"\1", text)
+    text = NOT_LETTERS.sub("", text)
+    text = re.sub(r"(.)\1+", r"\1", text)
     return text
 
 
-# ==================== СПИСКИ МАТА ====================
+# ==================== МАТ-КОРНИ ====================
 
-MAT_ROOTS_LONG = [
-    r"хуйло", r"хуйня", r"хуесос", r"хуисос", r"хуеплёт", r"хуеплет",
-    r"хуеглёт", r"хуеглот", r"хуемразь",
-    r"пизда", r"пизде", r"пизду", r"пизды", r"пиздо", r"пиздё",
-    r"пиздану", r"пиздато", r"пиздатый",
-    r"пиздец", r"пиздеца", r"пиздецки",
-    r"пиздюк", r"пиздюл", r"пиздюх",
-    r"пиздобол", r"пиздабол", r"пиздоболка",
-    r"пиздопляс", r"пиздостра",
-    r"пиздрик", r"пиздрила", r"пиздрёнок",
-    r"пиздюлина", r"пиздюлей", r"пиздюли",
-    r"распизд", r"запизд", r"впизд", r"спизд", r"испизд",
-    r"напизд", r"пропизд", r"припизд", r"допизд",
-    r"блядина", r"блядинк", r"блядищ",
-    r"блядство", r"блядств", r"блядск", r"блядская",
-    r"блядун", r"блядуш",
-    r"блядва", r"блядво",
-    r"забляд", r"набляд", r"пробляд",
-    r"выбляд", r"выблядок",
-    r"добляд", r"прибляд",
-    r"ебан", r"ёбан", r"ебану", r"ебанут", r"ебанул",
-    r"ебат", r"ебать", r"ёбат", r"ёбать", r"ебал", r"ёбал",
-    r"ебало", r"ёбало", r"ебальник", r"ебальн",
-    r"ебарь", r"ёбарь", r"ебари",
-    r"ебуч", r"ёбуч", r"ебучий", r"ёбучий",
-    r"ебёт", r"ебет", r"ебётся",
-    r"ебить", r"ебитв", r"ебитва",
-    r"ебля", r"ёбля", r"ебли", r"ёбли",
-    r"ебло", r"ёбло", r"еблом",
-    r"еблан", r"ёблан", r"ебланк",
-    r"ебств", r"ёбств", r"ебусь", r"ебут",
-    r"ебака",
-    r"заеб", r"заёб", r"заебал", r"заебись", r"заебу",
-    r"заебан", r"заёбан",
-    r"наеб", r"наёб", r"наебал", r"наебать", r"наебут",
-    r"наебан", r"наёбан", r"наебка",
-    r"отъеб", r"отъёб", r"отъебал", r"отъебать",
-    r"отъебис", r"отъебись",
-    r"подъеб", r"подъёб", r"подъебал", r"подъебка",
-    r"подъебну", r"подъёбну",
-    r"уебал", r"уебать", r"уебан",
-    r"уёбан", r"уебищ", r"уёбищ",
-    r"въеб", r"въёб", r"въебал", r"въебать", r"въебну",
-    r"проеб", r"проёб", r"проебал", r"проебать",
-    r"проебан", r"проёбан", r"проебу",
-    r"разъеб", r"разъёб", r"разъебал", r"разъебать",
-    r"разъебан", r"разъёбан",
-    r"съеб", r"съёб", r"съебал", r"съебать", r"съебался",
-    r"съебис", r"съебись",
-    r"доебал", r"доебать", r"доебис", r"доебись",
-    r"долбоеб", r"долбоёб", r"долбаеб", r"долбаёб",
-    r"долбоебк", r"долбоёбк",
-    r"недоеб", r"недоёб",
-    r"перееб", r"переёб", r"переебал", r"переебать",
-    r"переебан", r"переёбан", r"переебу",
-    r"поебал", r"поебать",
-    r"поебен", r"поебень", r"поебон",
-    r"поебушк", r"поебух",
-    r"ебалда",
-    r"сучка", r"сучки", r"сучонок",
-    r"сучара", r"сучарк", r"сучий", r"сучья", r"сучён",
-    r"паскуд", r"паскудник",
-    r"падлюк", r"падлюка", r"падлючк",
-    r"мудак", r"мудачь",
-    r"мудил", r"мудила", r"мудило",
-    r"мудозвон",
-    r"мудень", r"мудня",
-    r"замуд", r"намуд", r"промуда",
-    r"гандон", r"гондон",
-    r"кондом",
-    r"пидор", r"пидар", r"пидер",
-    r"педик", r"педер", r"педераст",
-    r"пидорас", r"пидарас", r"пидорасина",
-    r"пидорств", r"пидарств",
-    r"пидорок",
-    r"гомик", r"гомосек",
-    r"залуп", r"залупа", r"залупе", r"залупу",
-    r"залупк", r"залупок",
-    r"мандавошк", r"мандав", r"мандуй",
-    r"шлюха", r"шлюхи", r"шлюхо", r"шлюхе", r"шлюху",
-    r"шлюшка", r"шлюшки", r"шлюшк", r"шлюшонк", r"шлюшня",
-    r"пошлюх",
-    r"проститут", r"проститух",
-    r"шалава", r"шалавы", r"шалавищ",
-    r"потаскух", r"потаскушк",
-    r"хабалка", r"хабалк",
-    r"стерва", r"стервы", r"стерво",
-    r"блудниц",
-    r"влагалищ",
-    r"клитор",
-    r"спермат", r"сперматозо", r"сперматозоид",
-    r"мошонк", r"мошонка",
-    r"срака", r"сраку", r"сраки",
-    r"срать", r"срала",
-    r"срача", r"сраче",
-    r"ссать", r"ссала", r"ссанин",
-    r"пердёж", r"пердеж", r"пердану",
-    r"пердун", r"пердунь",
-    r"бздёж", r"бздеж", r"бздун",
-    r"какашк",
-    r"говно", r"говна", r"говне", r"говну",
-    r"говнюк", r"говнюшк",
-    r"говня", r"говнян", r"говняст",
-    r"дерьм", r"дерьмо", r"дерьма",
-    r"мочалк",
-    r"фекал", r"фекали",
-    r"испражн",
-    r"экскремен",
-    r"жопа", r"жопу", r"жопе", r"жопы",
-    r"жопан", r"жопень",
-    r"задниц", r"задница", r"задницу",
-    r"анальн",
-    r"анусн",
-    r"простат", r"простата",
-    r"дрочи", r"дрочил", r"дрочить",
-    r"дрочер",
-    r"онанизм", r"онанист",
-    r"мастурб", r"мастурбац", r"мастурби",
-    r"минет", r"миньет", r"минетч",
-    r"кунилингус", r"кунилинг",
-    r"фелляц",
-    r"оральн",
-    r"сексуаль", r"сексуальн",
-    r"половойакт",
-    r"совокуп", r"совокуплен",
-    r"сношен", r"сношение",
-    r"трахат", r"трахаю", r"трахал", r"трахать",
-    r"трахнул",
-    r"шмара", r"шмары",
-    r"подзаборн",
-    r"дешевка",
-    r"хохол", r"хохлы", r"хохлушк",
-    r"москаль", r"москаля",
-    r"кацапн",
-    r"жидяр",
-    r"чурбан",
-    r"чучмек",
-    r"хачик",
-    r"армяшк", r"армяшка",
-    r"дагест", r"дагестан",
-    r"чечен", r"чеченец",
-    r"китаёз", r"китаеза",
-    r"немчура",
-    r"фашист", r"нацист",
-    r"гитлер",
-    r"рашист", r"рашизм",
-    r"ватник",
-    r"героин", r"герыч",
-    r"кокаин",
-    r"амфетамин",
-    r"мефедрон",
-    r"метамфетамин",
-    r"марихуан",
-    r"гашиш",
-    r"мескалин",
-    r"экстази",
-    r"закладк", r"закладчик",
-    r"наркота", r"наркотик",
-    r"наркоман", r"наркоманк",
-    r"торчок",
-    r"ширнут", r"ширнул",
-    r"суицид",
-    r"самоубий", r"самоубийств",
-    r"повесит", r"повешусь", r"повесил",
-    r"убийств", r"убийц",
-    r"зарежу",
-    r"вскрытвен",
-    r"террорист", r"терроризм", r"теракт",
-    r"взорвать",
-    r"джихад",
-    r"шахид",
-    r"смертник",
-    r"игилов",
-    r"алькаид",
-    r"талиб",
-    r"педофил",
-    r"малолетк", r"малолеток",
-    r"несовершеннолетн",
-    r"сволочь", r"сволочи",
-    r"мразь", r"мрази", r"мразот",
-    r"тварь", r"твари", r"тварюг",
-    r"ублюдок", r"ублюдки",
-    r"кретин", r"кретинк",
-    r"дебильн",
-    r"идиот", r"идиотк",
-    r"придурок", r"придурки",
-    r"уродств",
-    r"гнида", r"гниды",
-    r"падлюка",
-    r"мерзавец", r"мерзавк",
-    r"негодяй",
-    r"поганец",
-    r"хамло",
-    r"нахалюга",
-    r"дегенерат",
-    r"олигофрен",
-    r"дауненок",
-    r"аутист",
-    r"прикончить",
-    r"уничтож",
-    r"расправ",
-    r"размажу",
-    r"раздавлю",
-    r"изнасил", r"изнасилую", r"изнасиловать",
-    r"хуй", r"хуя", r"хую", r"хуе", r"хуё", r"хуи",
-    r"пизд",
-    r"бляд", r"блят",
-    r"еб", r"ёб",
+MAT_ROOTS = [
+    # хуй
+    "хуй", "хуя", "хую", "хуе", "хуи", "хул",
+    "хуесос", "хуеплет", "хуеглот", "хуемраз",
+    # хер
+    "хер",
+    # пизд
+    "пизд", "пизж",
+    # бля
+    "бляд", "блят", "бля",
+    # еб
+    "еб", "ебан", "ебал", "ебат", "ебу", "еби", "ебло",
+    "заеб", "наеб", "отъеб", "подъеб", "уеб", "въеб",
+    "проеб", "разъеб", "съеб", "доеб", "долбоеб",
+    "перееб", "поеб", "недоеб",
+    # сук
+    "сука", "суки", "суке", "суку", "сукой", "сучар", "сучк", "суч",
+    "засук",
+    # муд
+    "мудак", "мудил", "мудор", "мудозвон", "мудень", "мудня",
+    # гандон
+    "гандон", "гондон", "ганд",
+    # пидор
+    "пидор", "пидар", "пидер", "пидр", "педик", "педер", "педераст",
+    "пидорас", "пидарас",
+    # гомик
+    "гомик", "гомосек",
+    # залуп
+    "залуп",
+    # манда
+    "манда", "мандав",
+    # шлюх
+    "шлюх", "шлюш",
+    # проститут
+    "проститут",
+    # шалав
+    "шалав", "потаск", "хабал", "стерв", "курв", "блуд",
+    # физиология
+    "влагалищ", "вагин", "клитор", "сперм",
+    # срак
+    "срак", "срать", "срал", "срач",
+    # сса
+    "ссат", "ссал", "ссан", "ссик",
+    # перд
+    "перд", "бзд",
+    # говн
+    "говн", "дерьм", "какашк", "жоп", "задниц",
+    # анал
+    "анал", "анус",
+    # дроч
+    "дроч", "онанизм", "онанист", "мастурб",
+    # минет
+    "минет", "миньет", "кунилингус", "фелл", "фелляц", "орал",
+    # секс
+    "секс", "сексуаль",
+    # трах
+    "трах",
+    # шмар
+    "шмар",
+    # национальные
+    "хохол", "хохлы", "москал", "кацап", "жид", "чурка", "чурки",
+    "чурбан", "чучмек", "хачик", "хачи", "азерб", "армяшк", "дагест",
+    "чечен", "узбек", "китаез", "немчура",
+    # фаш/наци
+    "фашист", "нацист", "гитлер", "рашист", "рашизм", "ватник",
+    # наркота
+    "героин", "герыч", "кокаин", "амфетамин", "мефедрон", "метамфетамин",
+    "марихуан", "гашиш", "мескалин", "экстази", "закладк", "закладчик",
+    "наркота", "наркотик", "наркоман", "торчок",
+    # суицид
+    "суицид", "самоубий", "повесит", "повешусь", "убить", "убийств",
+    "зарежу", "вскрытвен",
+    # терроризм
+    "террорист", "терроризм", "теракт", "взорвать", "джихад", "шахид",
+    "смертник", "игилов", "алькаид", "талиб",
+    # педофилия
+    "педофил", "малолетк", "малолеток", "несовершеннолетн",
+    # оскорбления
+    "сволоч", "мразь", "мрази", "мразот", "тварь", "твари", "тварюг",
+    "ублюдок", "ублюдки", "кретин", "кретинк", "дебил", "дебильн",
+    "идиот", "идиотк", "придурок", "придурки", "урод", "уроды", "уродств",
+    "гнида", "гниды", "падла", "падлы", "падлюка", "дрянь", "дряни",
+    "мерзавец", "мерзавк", "негодяй", "подлец", "поганец", "хамло",
+    "нахалюга", "дегенерат", "олигофрен", "дауненок", "аутист",
+    # угрозы
+    "убью", "прикончить", "уничтож", "порву", "порвать", "сожгу",
+    "сжечь", "казн", "казнить", "расправ", "размажу", "раздавлю",
+    "сломаю", "сломать", "изобью", "избить",
+    "изнасил", "изнасилую", "изнасиловать",
 ]
 
-MAT_ROOTS_SHORT = [
-    r"хуй", r"хуя", r"хую", r"хуе", r"хуё", r"хуи",
-    r"хуел", r"хуею", r"хуев", r"хуёв",
-    r"схуя", r"схуй",
-    r"хер", r"херов", r"херня", r"хернёй", r"херню", r"херовина",
-    r"пизд", r"пизж",
-    r"блядь", r"бляди", r"блядо", r"бляде", r"бляду",
-    r"блят", r"бляд", r"бля",
-    r"еб", r"ёб", r"ебу", r"еби", r"ебуч", r"ёбуч",
-    r"сука", r"суки", r"сук", r"сучк",
-    r"суч", r"сучар",
-    r"засук",
-    r"мудор", r"мудень", r"мудня", r"муд",
-    r"ганд",
-    r"пидр",
-    r"гомо",
-    r"манда", r"манде", r"манду", r"манды", r"мандо",
-    r"шлюх", r"шлюш",
-    r"шалав",
-    r"потаск",
-    r"хабал",
-    r"стерв",
-    r"курв", r"курва", r"курвы", r"курво",
-    r"блуд",
-    r"вагин", r"вагина",
-    r"сперм", r"сперма",
-    r"яичк",
-    r"срак",
-    r"сру", r"срал",
-    r"срач", r"срачь",
-    r"ссат", r"ссал", r"ссан", r"ссани",
-    r"ссик", r"ссику",
-    r"перд", r"пердну",
-    r"бзд",
-    r"вонюч",
-    r"моча", r"мочит", r"мочен",
-    r"жоп",
-    r"анал",
-    r"анус",
-    r"дроч",
-    r"онан",
-    r"фелл",
-    r"орал",
-    r"секс", r"секса", r"сексу", r"сексе",
-    r"полов",
-    r"снош",
-    r"трах", r"трахн",
-    r"шмар",
-    r"дешевк",
-    r"кацап",
-    r"жид",
-    r"чурка", r"чурки", r"чурк",
-    r"хач", r"хачи",
-    r"азерб",
-    r"узбек",
-    r"немч",
-    r"наци",
-    r"нарк", r"нарко",
-    r"торч",
-    r"убит", r"убить",
-    r"бомб", r"бомба",
-    r"игил",
-    r"педо",
-    r"мраз",
-    r"твар",
-    r"урод", r"уроды", r"уродина",
-    r"дрян", r"дрянь", r"дрянн",
-    r"подлец",
-    r"поган",
-    r"хам", r"хамл", r"хамск",
-    r"наглец", r"нагл",
-    r"нахал", r"наха",
-    r"убью",
-    r"порву", r"порвать",
-    r"сожгу", r"сжечь",
-    r"казн", r"казню", r"казнить",
-    r"размаж",
-    r"сломаю", r"сломать",
-    r"изобью", r"избить",
-]
+_seen = set()
+MAT_ROOTS_UNIQ = []
+for r in MAT_ROOTS:
+    if r not in _seen:
+        _seen.add(r)
+        MAT_ROOTS_UNIQ.append(r)
 
-WHITELIST = {
+# Сортируем от длинных к коротким — важно для корректного re.search
+MAT_ROOTS_UNIQ.sort(key=len, reverse=True)
+
+MAT_PATTERN = re.compile("|".join(re.escape(r) for r in MAT_ROOTS_UNIQ))
+
+# Whitelist — точные слова, которые не мат
+WHITELIST_RAW = {
     "херсон", "херсонес", "херсонский",
     "мандарин", "мандарины", "мандаринка", "мандариновый", "мандаринчик",
-    "анализ", "анализа", "аналитик", "аналитика", "анализировать", "аналитический",
+    "анализ", "анализа", "аналитик", "аналитика", "анализировать",
     "трахея", "трахеит", "трахеи", "трахеотомия",
     "секстант", "секстанта",
     "сукаленок", "сукаленка",
     "сракозябра", "сракозябры",
-    "моченый", "моченая", "моченые", "мочение",
-    "оральный", "оральная", "оральное", "оральные",
-    "половой", "половая", "половое", "половые", "половинка", "половина",
+    "моченый", "моченая", "моченые",
+    "оральный", "оральная", "оральное",
+    "половой", "половая", "половое", "половые",
+    "половинка", "половина", "половину",
     "сношение", "сношения",
     "дешевка", "дешевки", "дешевле",
     "соль", "соли", "солью",
-    "сиськи", "сиська", "сисек",
     "фаллос", "фаллоса",
     "пенис", "пениса",
-    "вагина", "вагины", "вагинальный", "вагинальная",
-    "клитор", "клитора", "клиторальный",
+    "вагина", "вагины", "вагинальный",
+    "клитор", "клитора",
     "анальный", "анальная", "анальное",
     "сексуальный", "сексуальная", "сексуальное", "сексуальность",
     "мастурбация",
@@ -393,84 +188,38 @@ WHITELIST = {
     "поганец",
 }
 
-MAT_LONG_PATTERN = re.compile(
-    r"(" + "|".join(MAT_ROOTS_LONG) + r")",
-    re.IGNORECASE
-)
+WHITELIST = {normalize(w) for w in WHITELIST_RAW}
 
-MAT_SHORT_PATTERN = re.compile(
-    r"(" + "|".join(MAT_ROOTS_SHORT) + r")",
-    re.IGNORECASE
-)
 
-BAD_WORDS = [
-    "шлюха", "шлюхи", "шлюхой", "шлюху", "шлюшкой", "шлюшка", "шлюшки",
-    "шлюшонок", "шлюшонка", "пошлюха",
-    "проститутка", "проститутки", "проституткой", "проститутками",
-    "путана", "путаны", "путаной",
-    "шалава", "шалавы", "шалавой",
-    "потаскуха", "потаскухи", "потаскухой",
-    "хабалка", "хабалки", "хабалкой",
-    "стерва", "стервы", "стервой", "стервозная",
-    "курва", "курвы", "курвой",
-    "блядь", "бляди", "блядью", "блядство", "блядский",
-    "блядина", "блядины", "блядинка",
-    "мандавошка", "мандавошки",
-    "влагалище", "вагина", "вагины",
-    "клитор", "клиторы",
-    "сперма", "спермы", "спермой",
-    "сволочь", "сволочи", "сволочью", "сволота",
-    "мразь", "мрази", "мразью", "мразота",
-    "тварь", "твари", "тварью", "тварюга",
-    "ублюдок", "ублюдки", "ублюдка",
-    "кретин", "кретинка",
-    "дебил", "дебилка",
-    "идиот", "идиотка",
-    "придурок", "придурки", "придурка",
-    "урод", "уроды", "уродина", "уродка",
-    "гнида", "гниды", "гнидой",
-    "падла", "падлы", "падлой", "падлюка",
-    "дрянь", "дряни", "дрянью",
-    "мерзавец", "мерзавка", "мерзавцы",
-    "негодяй", "негодяйка", "негодяи",
-    "подлец", "подлюка", "подлецы",
-    "поганец", "поганка",
-    "хамло", "хамла",
-    "наглец", "нахал", "нахалюга",
-    "шкура", "шкуры", "шкурой",
-    "овца", "овцы",
-    "курица", "куриц",
-    "сучара", "сучары",
-    "шавка", "шавки",
-    "лохушка", "лохушки",
-    "лох", "лохи", "лохом",
-    "чмо", "чмошник", "чмошница",
-    "чмырь", "чмыр",
-    "быдло", "быдла", "быдлом",
-    "кобыла", "кобылы",
-    "корова", "коровы",
-    "свинья", "свиньи",
-    "крыса", "крысы", "крысой",
-    "дегенерат", "дегенераты", "дегенератка",
-    "олигофрен", "олигофрены", "олигофренка",
-    "даун", "дауны", "даунка", "дауненок",
-    "аутист", "аутисты", "аутистка",
-    "нацист", "нацисты", "нацистка",
-    "фашист", "фашисты", "фашистка",
-    "гитлер", "гитлера",
-    "рашист", "рашисты", "рашизм",
-    "хохол", "хохлы", "хохлушка",
-    "москаль", "москали",
-    "кацап", "кацапы",
-    "чурка", "чурки", "чурбан",
-    "хач", "хачи", "хачик",
-    "жид", "жиды", "жидяра",
-    "нигер", "нигеры", "ниггер",
-    "черномазый", "черномазая",
-    "узкоглазый", "узкоглазая",
-]
+def has_bad_words(text: str) -> bool:
+    """
+    Проверка мата:
+    1) по словам — каждое нормализуем, ищем мат-корень
+    2) по склеенному тексту — ловим 'б л я т ь'
+    Whitelist исключается на всех уровнях.
+    """
+    if not text:
+        return False
 
-BAD_WORD_SET = set(w.lower() for w in BAD_WORDS)
+    # 1) по словам
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
+    for w in words:
+        wn = normalize(w)
+        if not wn:
+            continue
+        if wn in WHITELIST:
+            continue
+        if MAT_PATTERN.search(wn):
+            return True
+
+    # 2) склеенный текст
+    flat = normalize(text)
+    if flat and flat not in WHITELIST:
+        if MAT_PATTERN.search(flat):
+            return True
+
+    return False
+
 
 # ==================== МАГИЧЕСКИЙ ШАР ====================
 
@@ -486,128 +235,54 @@ MAGIC_8_BALL = [
     "🎱 Судьба решит за тебя.", "🎱 Я бы на твоём месте подумал.",
 ]
 
-# ==================== ПРОВЕРКА МАТА ====================
-
-def has_bad_words(text: str) -> bool:
-    if not text:
-        return False
-
-    raw_tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
-
-    for raw in raw_tokens:
-        token = normalize_word(raw)
-        if not token:
-            continue
-        if token in WHITELIST:
-            continue
-        if MAT_SHORT_PATTERN.search(token):
-            if any(w in token for w in WHITELIST):
-                if MAT_LONG_PATTERN.search(token):
-                    return True
-                continue
-            return True
-        if token in BAD_WORD_SET:
-            return True
-        if MAT_LONG_PATTERN.search(token):
-            return True
-
-    flat = normalize_flat(text)
-    if flat and flat not in WHITELIST:
-        if MAT_LONG_PATTERN.search(flat):
-            return True
-
-    return False
-
-
 # ==================== СЕРВИСНЫЕ СООБЩЕНИЯ ====================
 
-# Паттерны сервисных сообщений на разных языках
-# (для клиентов, которые присылают их как text, а не как new_chat_members)
 SERVICE_PATTERNS = [
-    # X пригласил Y / X invited Y
     re.compile(r".+\s+пригласил[а]?\s+.+", re.IGNORECASE),
     re.compile(r".+\s+invited\s+.+", re.IGNORECASE),
-    # X добавил Y / X added Y
     re.compile(r".+\s+добавил[а]?\s+.+", re.IGNORECASE),
     re.compile(r".+\s+added\s+.+", re.IGNORECASE),
-    # X вступил / X присоединился / X joined
     re.compile(r".+\s+вступил[а]?\s+(в|к)\s+", re.IGNORECASE),
     re.compile(r".+\s+присоединил(ся|ась)\s+", re.IGNORECASE),
     re.compile(r".+\s+joined\s+(the\s+)?group", re.IGNORECASE),
-    # X вышел / X покинул / X left
     re.compile(r".+\s+вышел\s+из\s+", re.IGNORECASE),
     re.compile(r".+\s+вышла\s+из\s+", re.IGNORECASE),
     re.compile(r".+\s+покинул[а]?\s+", re.IGNORECASE),
     re.compile(r".+\s+left\s+(the\s+)?group", re.IGNORECASE),
-    # X удалил Y / X removed Y
     re.compile(r".+\s+удалил[а]?\s+.+", re.IGNORECASE),
     re.compile(r".+\s+removed\s+.+", re.IGNORECASE),
-    # X изменил(а) название группы
     re.compile(r".+\s+изменил[а]?\s+название", re.IGNORECASE),
-    # Закреплённое сообщение / Pinned message
     re.compile(r"^(закрепл[её]нн?[оы][ем]?\s+сообщение|pinned\s+message)", re.IGNORECASE),
 ]
 
 
 def is_service_message(message: types.Message) -> bool:
-    """Проверяет, является ли сообщение сервисным о входе/выходе."""
-    # 1) Системные поля Telegram — самый надёжный способ
     if message.new_chat_members:
         return True
     if message.left_chat_member:
         return True
-    if getattr(message, "new_chat_title", None):
-        return True
-    if getattr(message, "new_chat_photo", None):
-        return True
-    if getattr(message, "delete_chat_photo", None):
-        return True
-    if getattr(message, "pinned_message", None):
-        return True
-    if getattr(message, "group_chat_created", None):
-        return True
-    if getattr(message, "supergroup_chat_created", None):
-        return True
-    if getattr(message, "channel_chat_created", None):
-        return True
-    if getattr(message, "migrate_to_chat_id", None):
-        return True
-    if getattr(message, "migrate_from_chat_id", None):
-        return True
-    if getattr(message, "video_chat_started", None):
-        return True
-    if getattr(message, "video_chat_ended", None):
-        return True
-    if getattr(message, "video_chat_scheduled", None):
-        return True
-    if getattr(message, "video_chat_participants_invited", None):
-        return True
-    if getattr(message, "proximity_alert_triggered", None):
-        return True
-    if getattr(message, "forum_topic_created", None):
-        return True
-    if getattr(message, "forum_topic_closed", None):
-        return True
-    if getattr(message, "forum_topic_reopened", None):
-        return True
+    for attr in (
+        "new_chat_title", "new_chat_photo", "delete_chat_photo",
+        "pinned_message", "group_chat_created", "supergroup_chat_created",
+        "channel_chat_created", "migrate_to_chat_id", "migrate_from_chat_id",
+        "video_chat_started", "video_chat_ended", "video_chat_scheduled",
+        "video_chat_participants_invited", "proximity_alert_triggered",
+        "forum_topic_created", "forum_topic_closed", "forum_topic_reopened",
+    ):
+        if getattr(message, attr, None):
+            return True
 
-    # 2) Текстовые паттерны — на случай, если Telegram прислал как обычный текст
-    # (бывает в некоторых клиентах или при пересылке сервисных сообщений)
     text = message.text or message.caption or ""
-    if text:
-        # короткие сообщения (<= 200 символов) с упоминанием @username + глагола
-        if len(text) <= 200:
-            for pattern in SERVICE_PATTERNS:
-                if pattern.search(text):
-                    # дополнительная проверка: должен быть @username или имя в начале
-                    if "@" in text or text[0].isupper():
-                        return True
+    if text and len(text) <= 200:
+        for pattern in SERVICE_PATTERNS:
+            if pattern.search(text):
+                if "@" in text or text[0].isupper():
+                    return True
 
     return False
 
 
 def service_cleaner_enabled(chat_id: int) -> bool:
-    """По умолчанию автоудаление сервисных сообщений включено."""
     return SERVICE_CLEANER_ENABLED.get(chat_id, True)
 
 
@@ -619,28 +294,25 @@ def cache_user(chat_id: int, user: types.User):
     USERNAME_CACHE.setdefault(chat_id, {})[user.username.lower()] = user.id
 
 
-def resolve_username(chat_id: int, username: str) -> int | None:
+def resolve_username(chat_id: int, username: str):
     if not username:
         return None
-    uname = username.lstrip("@").lower()
-    return USERNAME_CACHE.get(chat_id, {}).get(uname)
+    return USERNAME_CACHE.get(chat_id, {}).get(username.lstrip("@").lower())
 
 
-def extract_username_from_text(text: str) -> str | None:
+def extract_username_from_text(text: str):
     if not text:
         return None
     m = re.search(r"@([A-Za-z0-9_]{4,32})", text)
     return m.group(0) if m else None
 
 
-def extract_user_id_from_text(text: str) -> int | None:
+def extract_user_id_from_text(text: str):
     if not text:
         return None
     m = re.search(r"\b(\d{6,15})\b", text)
     return int(m.group(1)) if m else None
 
-
-# ==================== ЦЕЛЬ КОМАНДЫ ====================
 
 async def resolve_target(message: types.Message):
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -714,7 +386,7 @@ def extract_target_user(message: types.Message):
     return None, None
 
 
-# ==================== ПРОЧИЕ УТИЛИТЫ ====================
+# ==================== УТИЛИТЫ ====================
 
 async def is_admin(message: types.Message) -> bool:
     if message.chat.type == ChatType.PRIVATE:
@@ -768,7 +440,7 @@ async def bot_can_delete(message: types.Message) -> bool:
         return False
 
 
-def parse_minutes(args: list[str]) -> int | None:
+def parse_minutes(args):
     for a in args[1:]:
         if a.isdigit() and len(a) <= 5:
             n = int(a)
@@ -782,10 +454,7 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
         await message.reply("🤖 Нельзя наказывать самого бота.")
         return False
     if await is_target_admin(message, user_id):
-        await message.reply(
-            f"🛡 <b>{name}</b> — админ/владелец чата. "
-            f"Его нельзя наказать этой командой."
-        )
+        await message.reply(f"🛡 <b>{name}</b> — админ/владелец чата. Его нельзя наказать.")
         return False
     return True
 
@@ -796,12 +465,12 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
 async def cmd_start(message: types.Message):
     cache_user(message.chat.id, message.from_user)
     await message.answer(
-        "👋 Привет! Я бот-цензор и не только.\n\n"
-        "🛡 Удаляю мат автоматически (в т.ч. замаскированный)\n"
-        "🧹 Чищу сервисные сообщения (вход/выход/приглашения)\n"
-        "🎲 Имею кучу развлекательных команд\n"
-        "🔨 Могу модерировать чат\n\n"
-        "📌 Напиши /help для списка команд."
+        "👋 Привет! Я бот-цензор.\n\n"
+        "🛡 Удаляю мат автоматически\n"
+        "🧹 Чищу сервисные сообщения\n"
+        "🎲 Развлекательные команды\n"
+        "🔨 Модерация\n\n"
+        "📌 /help для списка команд."
     )
 
 
@@ -811,33 +480,25 @@ async def cmd_help(message: types.Message):
     await message.answer(
         "🛡 <b>Бот-цензор</b>\n\n"
         "<b>🎲 Развлечения:</b>\n"
-        "/rps — КНБ с ботом\n"
-        "/rps @user или reply — КНБ с другим участником\n"
-        "/dice — бросить кубик (1–6)\n"
-        "/coin — орёл или решка\n"
+        "/rps — КНБ с ботом или @user\n"
+        "/dice — кубик\n"
+        "/coin — орёл/решка\n"
         "/ball &lt;вопрос&gt; — магический шар\n\n"
         "<b>🔨 Модерация (для админов):</b>\n"
         "/delete — удалить сообщение (reply)\n"
-        "/kick @user или reply — кикнуть\n"
-        "/ban @user или reply — забанить\n"
-        "/unban @user или ID — разбанить\n"
-        "/tempban &lt;мин&gt; @user или reply — временный бан\n"
-        "/mute &lt;мин&gt; @user или reply — замутить\n"
-        "/unmute @user или reply — снять мут\n\n"
+        "/kick — кикнуть (@user или reply)\n"
+        "/ban — забанить (@user или reply)\n"
+        "/unban — разбанить (@user или ID)\n"
+        "/tempban &lt;мин&gt; — временный бан\n"
+        "/mute &lt;мин&gt; — мут\n"
+        "/unmute — снять мут\n\n"
         "<b>🛡 Управление (для админов):</b>\n"
-        "/censor — включить фильтр мата\n"
-        "/uncensor — выключить фильтр мата\n"
-        "/censor_status — статус фильтра\n"
-        "/service_on — включить чистку сервисных сообщений\n"
-        "/service_off — выключить чистку\n"
-        "/service_status — статус чистки\n\n"
-        "🧹 <i>Бот автоматически удаляет:\n"
-        "• @X пригласил @Y\n"
-        "• @X добавил @Y\n"
-        "• @X вступил/присоединился\n"
-        "• @X вышел/покинул\n"
-        "• @X удалил @Y\n"
-        "• закреплённые сообщения</i>"
+        "/censor — включить цензуру\n"
+        "/uncensor — выключить цензуру\n"
+        "/censor_status — статус цензуры\n"
+        "/service_on — вкл. чистку сервисных\n"
+        "/service_off — выкл. чистку\n"
+        "/service_status — статус чистки"
     )
 
 
@@ -845,76 +506,73 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("цензура"))
 async def cmd_censor_on(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут управлять цензурой.")
+        await message.reply("❌ Только админы.")
         return
     CENSOR_ENABLED[message.chat.id] = True
-    await message.answer("✅ Цензура <b>включена</b>. Мат будет удаляться.")
+    await message.answer("✅ Цензура <b>включена</b>.")
 
 
 @dp.message(Command("uncensor"))
 @dp.message(Command("безцензуры"))
 async def cmd_censor_off(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут управлять цензурой.")
+        await message.reply("❌ Только админы.")
         return
     CENSOR_ENABLED[message.chat.id] = False
-    await message.answer("🔓 Цензура <b>выключена</b>. Мат больше не удаляется.")
+    await message.answer("🔓 Цензура <b>выключена</b>.")
 
 
 @dp.message(Command("censor_status"))
 @dp.message(Command("статусцензуры"))
 async def cmd_censor_status(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     status = CENSOR_ENABLED.get(message.chat.id, True)
     emoji = "✅" if status else "🔓"
     state = "включена" if status else "выключена"
-    await message.answer(f"{emoji} Цензура сейчас <b>{state}</b>.")
+    await message.answer(f"{emoji} Цензура <b>{state}</b>.")
 
 
 @dp.message(Command("service_on"))
-@dp.message(Command("чистка_вкл"))
 async def cmd_service_on(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут управлять чисткой.")
+        await message.reply("❌ Только админы.")
         return
     SERVICE_CLEANER_ENABLED[message.chat.id] = True
-    await message.answer("✅ Чистка сервисных сообщений <b>включена</b>.")
+    await message.answer("✅ Чистка сервисных <b>включена</b>.")
 
 
 @dp.message(Command("service_off"))
-@dp.message(Command("чистка_выкл"))
 async def cmd_service_off(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут управлять чисткой.")
+        await message.reply("❌ Только админы.")
         return
     SERVICE_CLEANER_ENABLED[message.chat.id] = False
-    await message.answer("🔓 Чистка сервисных сообщений <b>выключена</b>.")
+    await message.answer("🔓 Чистка сервисных <b>выключена</b>.")
 
 
 @dp.message(Command("service_status"))
-@dp.message(Command("статусчистки"))
 async def cmd_service_status(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     status = SERVICE_CLEANER_ENABLED.get(message.chat.id, True)
     emoji = "✅" if status else "🔓"
     state = "включена" if status else "выключена"
-    await message.answer(f"{emoji} Чистка сервисных сообщений <b>{state}</b>.")
+    await message.answer(f"{emoji} Чистка сервисных <b>{state}</b>.")
 
 
 # ==================== /delete ====================
@@ -923,7 +581,7 @@ async def cmd_service_status(message: types.Message):
 @dp.message(Command("удалить"))
 async def cmd_delete(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.answer("❌ Команда работает только в группах.")
+        await message.answer("❌ Только в группах.")
         return
     if not await is_admin(message):
         try:
@@ -932,7 +590,7 @@ async def cmd_delete(message: types.Message):
             pass
         return
     if not await bot_can_delete(message):
-        await message.reply("❌ У меня нет прав на удаление сообщений.")
+        await message.reply("❌ Нет прав на удаление.")
         return
     if not message.reply_to_message:
         try:
@@ -1059,7 +717,7 @@ async def rps_callback(call: CallbackQuery):
     _, game_id, choice = parts
     game = RPS_GAMES.get(game_id)
     if not game:
-        await call.answer("Игра не найдена или уже завершена.", show_alert=True)
+        await call.answer("Игра не найдена или завершена.", show_alert=True)
         return
 
     user_id = call.from_user.id
@@ -1174,10 +832,10 @@ async def cmd_ball(message: types.Message):
 @dp.message(Command("кик"))
 async def cmd_kick(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     if not await bot_can_restrict(message):
-        await message.reply("❌ У меня нет прав на ограничение участников.")
+        await message.reply("❌ Нет прав на ограничение.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1188,19 +846,19 @@ async def cmd_kick(message: types.Message):
     try:
         await bot.ban_chat_member(message.chat.id, user_id)
         await bot.unban_chat_member(message.chat.id, user_id)
-        await message.answer(f"👢 {name} кикнут из чата.")
+        await message.answer(f"👢 {name} кикнут.")
     except Exception as e:
-        await message.reply(f"❌ Не удалось кикнуть: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("ban"))
 @dp.message(Command("бан"))
 async def cmd_ban(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     if not await bot_can_restrict(message):
-        await message.reply("❌ У меня нет прав на ограничение участников.")
+        await message.reply("❌ Нет прав на ограничение.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1212,17 +870,17 @@ async def cmd_ban(message: types.Message):
         await bot.ban_chat_member(message.chat.id, user_id)
         await message.answer(f"🔨 {name} забанен навсегда.")
     except Exception as e:
-        await message.reply(f"❌ Не удалось забанить: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("unban"))
 @dp.message(Command("разбан"))
 async def cmd_unban(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     if not await bot_can_restrict(message):
-        await message.reply("❌ У меня нет прав на ограничение участников.")
+        await message.reply("❌ Нет прав на ограничение.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1232,17 +890,17 @@ async def cmd_unban(message: types.Message):
         await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
         await message.answer(f"🔓 {name} разбанен.")
     except Exception as e:
-        await message.reply(f"❌ Не удалось разбанить: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("tempban"))
 @dp.message(Command("врембан"))
 async def cmd_tempban(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     if not await bot_can_restrict(message):
-        await message.reply("❌ У меня нет прав на ограничение участников.")
+        await message.reply("❌ Нет прав на ограничение.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1253,7 +911,7 @@ async def cmd_tempban(message: types.Message):
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
-        await message.reply("❌ Укажи время в минутах: <code>/tempban 30</code>")
+        await message.reply("❌ Укажи время: <code>/tempban 30</code>")
         return
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
@@ -1263,17 +921,17 @@ async def cmd_tempban(message: types.Message):
         )
         await message.answer(f"⏱ {name} забанен на <b>{minutes} мин.</b>")
     except Exception as e:
-        await message.reply(f"❌ Не удалось забанить: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("mute"))
 @dp.message(Command("мут"))
 async def cmd_mute(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     if not await bot_can_restrict(message):
-        await message.reply("❌ У меня нет прав на ограничение участников.")
+        await message.reply("❌ Нет прав на ограничение.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1284,7 +942,7 @@ async def cmd_mute(message: types.Message):
     args = (message.text or "").split()
     minutes = parse_minutes(args)
     if not minutes:
-        await message.reply("❌ Укажи время в минутах: <code>/mute 15</code>")
+        await message.reply("❌ Укажи время: <code>/mute 15</code>")
         return
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
@@ -1299,14 +957,14 @@ async def cmd_mute(message: types.Message):
         )
         await message.answer(f"🔇 {name} замучен на <b>{minutes} мин.</b>")
     except Exception as e:
-        await message.reply(f"❌ Не удалось замутить: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("unmute"))
 @dp.message(Command("размут"))
 async def cmd_unmute(message: types.Message):
     if not await is_admin(message):
-        await message.reply("❌ Только админы могут использовать эту команду.")
+        await message.reply("❌ Только админы.")
         return
     user_id, name, err = await resolve_target(message)
     if err:
@@ -1335,80 +993,74 @@ async def cmd_unmute(message: types.Message):
         TEMP_MUTES.get(message.chat.id, {}).pop(user_id, None)
         await message.answer(f"🔊 {name} размучен.")
     except Exception as e:
-        await message.reply(f"❌ Не удалось размутить: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
 
 
-# ==================== АВТОУДАЛЕНИЕ СЕРВИСНЫХ СООБЩЕНИЙ ====================
+# ==================== АВТОУДАЛЕНИЕ СЕРВИСНЫХ ====================
 
 @dp.message(F.new_chat_members)
 async def on_new_chat_members(message: types.Message):
-    """Ловит сервисные сообщения о входе/приглашении."""
     if not service_cleaner_enabled(message.chat.id):
         return
     try:
         await message.delete()
-        logging.info(f"Удалено сервисное сообщение (new_chat_members) в {message.chat.id}")
+        logging.info(f"Удалено сервисное (new_chat_members) в {message.chat.id}")
     except Exception as e:
-        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+        logging.warning(f"Не удалось удалить сервисное: {e}")
 
 
 @dp.message(F.left_chat_member)
 async def on_left_chat_member(message: types.Message):
-    """Ловит сервисные сообщения о выходе."""
     if not service_cleaner_enabled(message.chat.id):
         return
     try:
         await message.delete()
-        logging.info(f"Удалено сервисное сообщение (left_chat_member) в {message.chat.id}")
+        logging.info(f"Удалено сервисное (left_chat_member) в {message.chat.id}")
     except Exception as e:
-        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+        logging.warning(f"Не удалось удалить сервисное: {e}")
 
 
 @dp.message(F.pinned_message)
 async def on_pinned_message(message: types.Message):
-    """Ловит сервисные сообщения о закреплении."""
     if not service_cleaner_enabled(message.chat.id):
         return
     try:
         await message.delete()
-        logging.info(f"Удалено сервисное сообщение (pinned_message) в {message.chat.id}")
+        logging.info(f"Удалено сервисное (pinned_message) в {message.chat.id}")
     except Exception as e:
-        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+        logging.warning(f"Не удалось удалить сервисное: {e}")
 
 
 @dp.message(F.new_chat_title | F.new_chat_photo | F.delete_chat_photo)
 async def on_chat_changes(message: types.Message):
-    """Ловит сервисные сообщения об изменении названия/аватара чата."""
     if not service_cleaner_enabled(message.chat.id):
         return
     try:
         await message.delete()
-        logging.info(f"Удалено сервисное сообщение (chat_changes) в {message.chat.id}")
+        logging.info(f"Удалено сервисное (chat_changes) в {message.chat.id}")
     except Exception as e:
-        logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+        logging.warning(f"Не удалось удалить сервисное: {e}")
 
+
+# ==================== ОБЩИЙ ФИЛЬТР ====================
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    """Общий хендлер: кэш + мат + сервисные по тексту."""
-    # Кэшируем автора
+    # Кэшируем авторов
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
         cache_user(message.chat.id, message.reply_to_message.from_user)
 
-    # Проверяем сервисные по тексту (для клиентов, которые шлют их как текст)
+    # Сервисные по тексту
     if service_cleaner_enabled(message.chat.id) and is_service_message(message):
         try:
             await message.delete()
-            logging.info(
-                f"Удалено сервисное сообщение (text) в {message.chat.id}"
-            )
+            logging.info(f"Удалено сервисное (text) в {message.chat.id}")
         except Exception as e:
-            logging.warning(f"Не удалось удалить сервисное сообщение: {e}")
+            logging.warning(f"Не удалось удалить сервисное: {e}")
         return
 
-    # Мат
     if not message.text:
         return
     if message.text.startswith("/"):
