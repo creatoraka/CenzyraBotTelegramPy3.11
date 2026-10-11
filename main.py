@@ -31,10 +31,13 @@ dp = Dispatcher()
 TEMP_BANS = {}
 TEMP_MUTES = {}
 RPS_GAMES = {}
-# Хранилище статуса цензуры: {chat_id: True/False}. По умолчанию включена.
 CENSOR_ENABLED = {}
 
-# ==================== КАРТА ПОХОЖИХ СИМВОЛОВ ====================
+# Кэш пользователей: {chat_id: {username_lower: user_id}}
+# и обратный: {(chat_id, user_id): username_lower}
+USERNAME_CACHE = {}
+
+# ==================== НОРМАЛИЗАЦИЯ ====================
 
 HOMOGLYPHS = str.maketrans({
     "a": "а", "A": "а",
@@ -50,29 +53,35 @@ HOMOGLYPHS = str.maketrans({
     "h": "н", "H": "н",
     "b": "в", "B": "в",
     "n": "п", "N": "п",
-    "0": "о",
-    "1": "и",
-    "3": "з",
-    "4": "а",
-    "6": "б",
-    "8": "в",
-    "9": "д",
+    "0": "о", "1": "и", "3": "з", "4": "а",
+    "6": "б", "8": "в", "9": "д",
 })
 
+RU_LETTERS_RE = re.compile(r"[^а-яё]")
 
-def normalize_text(text: str) -> str:
+
+def normalize_word(word: str) -> str:
+    if not word:
+        return ""
+    word = word.lower()
+    word = word.translate(HOMOGLYPHS)
+    word = RU_LETTERS_RE.sub("", word)
+    word = re.sub(r"(.)\1{2,}", r"\1", word)
+    return word
+
+
+def normalize_flat(text: str) -> str:
     if not text:
         return ""
     text = text.lower()
     text = text.translate(HOMOGLYPHS)
-    text = re.sub(r"[^а-яёa-z]", "", text)
+    text = RU_LETTERS_RE.sub("", text)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
     return text
 
 
-# ==================== СПИСКИ ЗАПРЕЩЁННЫХ СЛОВ ====================
+# ==================== СПИСКИ ====================
 
-# Длинные корни (>= 5 букв) — ищутся как подстроки, мало ложных срабатываний
 MAT_ROOTS_LONG = [
     r"хуйло", r"хуйня", r"хуесос", r"хуисос", r"хуеплёт", r"хуеплет",
     r"хуеглёт", r"хуеглот", r"хуемразь",
@@ -86,7 +95,7 @@ MAT_ROOTS_LONG = [
     r"пиздюлина", r"пиздюлей", r"пиздюли",
     r"распизд", r"запизд", r"впизд", r"спизд", r"испизд",
     r"напизд", r"пропизд", r"припизд", r"допизд",
-    r"блядь", r"бляди", r"блядо", r"бляде", r"бляду",
+    r"блядина", r"блядинк", r"блядищ",
     r"блядство", r"блядств", r"блядск", r"блядская",
     r"блядун", r"блядуш",
     r"блядва", r"блядво",
@@ -156,7 +165,6 @@ MAT_ROOTS_LONG = [
     r"шлюшка", r"шлюшки", r"шлюшк", r"шлюшонк", r"шлюшня",
     r"пошлюх",
     r"проститут", r"проститух",
-    r"блядина", r"блядинк", r"блядищ",
     r"шалава", r"шалавы", r"шалавищ",
     r"потаскух", r"потаскушк",
     r"хабалка", r"хабалк",
@@ -247,7 +255,7 @@ MAT_ROOTS_LONG = [
     r"шахид",
     r"смертник",
     r"игилов",
-    r"алькаид", r"аль-каид",
+    r"алькаид",
     r"талиб",
     r"педофил",
     r"малолетк", r"малолеток",
@@ -278,29 +286,30 @@ MAT_ROOTS_LONG = [
     r"размажу",
     r"раздавлю",
     r"изнасил", r"изнасилую", r"изнасиловать",
+    r"хуй", r"хуя", r"хую", r"хуе", r"хуё", r"хуи",
+    r"пизд",
+    r"бляд", r"блят",
+    r"еб", r"ёб",
 ]
 
-# Короткие корни (<= 4 буквы) — проверяются ТОЛЬКО как отдельные слова
 MAT_ROOTS_SHORT = [
-    r"хуй", r"хуя", r"хую", r"хуе", r"хуё", r"хуи", r"хуйн",
-    r"хуец", r"хуищ", r"хуяч", r"хуяр",
+    r"хуй", r"хуя", r"хую", r"хуе", r"хуё", r"хуи",
     r"хуел", r"хуею", r"хуев", r"хуёв",
     r"схуя", r"схуй",
-    r"хер", r"херов", r"херня", r"херовина",
+    r"хер", r"херов", r"херня", r"хернёй", r"херню", r"херовина",
     r"пизд", r"пизж",
-    r"бляд", r"блят", r"бля",
-    r"еб", r"ёб",
-    r"ебу", r"еби",
+    r"блядь", r"бляди", r"блядо", r"бляде", r"бляду",
+    r"блят", r"бляд", r"бля",
+    r"еб", r"ёб", r"ебу", r"еби", r"ебуч", r"ёбуч",
     r"сука", r"суки", r"сук", r"сучк",
     r"суч", r"сучар",
     r"засук",
-    r"мудор",
+    r"мудор", r"мудень", r"мудня", r"муд",
     r"ганд",
     r"пидр",
     r"гомо",
     r"манда", r"манде", r"манду", r"манды", r"мандо",
     r"шлюх", r"шлюш",
-    r"блядина",
     r"шалав",
     r"потаск",
     r"хабал",
@@ -313,20 +322,17 @@ MAT_ROOTS_SHORT = [
     r"срак",
     r"сру", r"срал",
     r"срач", r"срачь",
-    r"ссат", r"ссал", r"ссан",
-    r"ссани",
+    r"ссат", r"ссал", r"ссан", r"ссани",
     r"ссик", r"ссику",
     r"перд", r"пердну",
     r"бзд",
     r"вонюч",
-    r"моча", r"мочит",
-    r"мочен",
+    r"моча", r"мочит", r"мочен",
     r"жоп",
     r"анал",
     r"анус",
     r"дроч",
     r"онан",
-    r"минет",
     r"фелл",
     r"орал",
     r"секс", r"секса", r"сексу", r"сексе",
@@ -343,15 +349,9 @@ MAT_ROOTS_SHORT = [
     r"узбек",
     r"немч",
     r"наци",
-    r"герыч",
-    r"спайс",
-    r"соль",
-    r"лсд",
-    r"мдма",
     r"нарк", r"нарко",
     r"торч",
     r"убит", r"убить",
-    r"зареза",
     r"бомб", r"бомба",
     r"игил",
     r"педо",
@@ -364,7 +364,7 @@ MAT_ROOTS_SHORT = [
     r"хам", r"хамл", r"хамск",
     r"наглец", r"нагл",
     r"нахал", r"наха",
-    r"убью", r"убью",
+    r"убью",
     r"порву", r"порвать",
     r"сожгу", r"сжечь",
     r"казн", r"казню", r"казнить",
@@ -373,46 +373,43 @@ MAT_ROOTS_SHORT = [
     r"изобью", r"избить",
 ]
 
-# Whitelist — слова, которые НЕ являются матом (проверяются первыми)
 WHITELIST = {
     "херсон", "херсонес", "херсонский",
-    "мандарин", "мандарины", "мандаринка", "мандариновый",
-    "анализ", "анализа", "аналитик", "аналитика", "анализировать",
-    "трахея", "трахеит", "трахеи",
+    "мандарин", "мандарины", "мандаринка", "мандариновый", "мандаринчик",
+    "анализ", "анализа", "аналитик", "аналитика", "анализировать", "аналитический",
+    "трахея", "трахеит", "трахеи", "трахеотомия",
     "секстант", "секстанта",
     "сукаленок", "сукаленка",
     "сракозябра", "сракозябры",
-    "моченый", "моченая", "моченые",
-    "пердеться",  # редкое, но есть
-    "оральный", "оральная",  # медицинский термин
-    "половой", "половая", "половое", "половые",  # биология
-    "сношение", "сношения",  # медицинский/книжный термин
-    "дешевка",  # не мат
-    "соль", "соли",  # не только наркотик
-    "пердун",  # по контексту, но редко как оскорбление
-    "сиськи",  # не мат
-    "фаллос", "фаллоса",  # медицинский
-    "пенис", "пениса",  # медицинский
-    "вагина", "вагины", "вагинальный",  # медицинский
-    "клитор", "клитора",  # медицинский
-    "анальный", "анальная",  # медицинский
-    "сексуальный", "сексуальная",  # не мат
-    "сексуальность",  # не мат
+    "моченый", "моченая", "моченые", "мочение",
+    "оральный", "оральная", "оральное", "оральные",
+    "половой", "половая", "половое", "половые", "половинка", "половина",
+    "сношение", "сношения",
+    "дешевка", "дешевки", "дешевле",
+    "соль", "соли", "солью",
+    "сиськи", "сиська", "сисек",
+    "фаллос", "фаллоса",
+    "пенис", "пениса",
+    "вагина", "вагины", "вагинальный", "вагинальная",
+    "клитор", "клитора", "клиторальный",
+    "анальный", "анальная", "анальное",
+    "сексуальный", "сексуальная", "сексуальное", "сексуальность",
+    "мастурбация",
+    "наркотик", "наркотики",
+    "хамство", "хамства",
+    "поганец",
 }
 
-# Длинные паттерны (подстрока)
 MAT_LONG_PATTERN = re.compile(
     r"(" + "|".join(MAT_ROOTS_LONG) + r")",
     re.IGNORECASE
 )
 
-# Короткие паттерны — только как отдельные слова
 MAT_SHORT_PATTERN = re.compile(
-    r"(?<![а-яё])(" + "|".join(MAT_ROOTS_SHORT) + r")(?![а-яё])",
+    r"(" + "|".join(MAT_ROOTS_SHORT) + r")",
     re.IGNORECASE
 )
 
-# Плохие слова — только как отдельные слова
 BAD_WORDS = [
     "шлюха", "шлюхи", "шлюхой", "шлюху", "шлюшкой", "шлюшка", "шлюшки",
     "шлюшонок", "шлюшонка", "пошлюха",
@@ -480,10 +477,7 @@ BAD_WORDS = [
     "узкоглазый", "узкоглазая",
 ]
 
-BAD_WORD_PATTERN = re.compile(
-    r"(?<![а-яё])(" + "|".join(map(re.escape, BAD_WORDS)) + r")(?![а-яё])",
-    re.IGNORECASE
-)
+BAD_WORD_SET = set(w.lower() for w in BAD_WORDS)
 
 # ==================== МАГИЧЕСКИЙ ШАР ====================
 
@@ -499,70 +493,166 @@ MAGIC_8_BALL = [
     "🎱 Судьба решит за тебя.", "🎱 Я бы на твоём месте подумал.",
 ]
 
-# ==================== УТИЛИТЫ ====================
+# ==================== ПРОВЕРКА МАТА ====================
 
 def has_bad_words(text: str) -> bool:
-    """
-    Проверяет текст на мат с учётом обходов и без ложных срабатываний.
-    """
-    normalized = normalize_text(text)
-    if not normalized:
+    if not text:
         return False
 
-    # Проверка whitelist — если нормализованное слово целиком в whitelist, пропускаем
-    # (простая защита от самых частых ложных срабатываний)
-    if normalized in WHITELIST:
-        return False
+    raw_tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
 
-    # Длинные корни — подстрокой
-    if MAT_LONG_PATTERN.search(normalized):
-        # Но если это whitelist-слово — пропускаем
-        whitelist_hit = False
-        for w in WHITELIST:
-            if w in normalized:
-                whitelist_hit = True
-                break
-        if not whitelist_hit:
+    for raw in raw_tokens:
+        token = normalize_word(raw)
+        if not token:
+            continue
+        if token in WHITELIST:
+            continue
+        if MAT_SHORT_PATTERN.search(token):
+            if any(w in token for w in WHITELIST):
+                if MAT_LONG_PATTERN.search(token):
+                    return True
+                continue
+            return True
+        if token in BAD_WORD_SET:
+            return True
+        if MAT_LONG_PATTERN.search(token):
             return True
 
-    # Короткие корни — только как отдельные слова
-    if MAT_SHORT_PATTERN.search(normalized):
-        # Дополнительно проверим whitelist для коротких
-        tokens = re.findall(r"[а-яё]+", normalized)
-        for token in tokens:
-            if token in WHITELIST:
-                continue
-            if MAT_SHORT_PATTERN.fullmatch(token):
-                return True
-
-    # Плохие слова — как отдельные слова
-    if BAD_WORD_PATTERN.search(normalized):
-        return True
+    flat = normalize_flat(text)
+    if flat and flat not in WHITELIST:
+        if MAT_LONG_PATTERN.search(flat):
+            return True
 
     return False
 
 
-def censor_enabled(chat_id: int) -> bool:
-    """По умолчанию цензура включена."""
-    return CENSOR_ENABLED.get(chat_id, True)
+# ==================== КЭШ ПОЛЬЗОВАТЕЛЕЙ ====================
+
+def cache_user(chat_id: int, user: types.User):
+    """Запоминает username ↔ user_id для резолва по @username."""
+    if not user or not user.username:
+        return
+    USERNAME_CACHE.setdefault(chat_id, {})[user.username.lower()] = user.id
+
+
+def resolve_username(chat_id: int, username: str) -> int | None:
+    """Ищет user_id по @username в кэше чата."""
+    if not username:
+        return None
+    uname = username.lstrip("@").lower()
+    return USERNAME_CACHE.get(chat_id, {}).get(uname)
+
+
+def extract_username_from_text(text: str) -> str | None:
+    """Ищет @username в тексте."""
+    if not text:
+        return None
+    m = re.search(r"@([A-Za-z0-9_]{4,32})", text)
+    return m.group(0) if m else None
+
+
+def extract_user_id_from_text(text: str) -> int | None:
+    """Ищет числовой ID в тексте (для /unban 123456789)."""
+    if not text:
+        return None
+    m = re.search(r"\b(\d{6,15})\b", text)
+    return int(m.group(1)) if m else None
+
+
+# ==================== ЦЕЛЬ КОМАНДЫ ====================
+
+async def resolve_target(message: types.Message):
+    """
+    Возвращает (user_id, display_name, error_message).
+    Порядок:
+    1) reply
+    2) text_mention / mention (@username с entity) — если user_id есть, вернём его
+    3) @username в тексте — ищем в кэше
+    4) числовой ID в тексте
+    """
+    # 1) reply
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        cache_user(message.chat.id, u)
+        return u.id, u.full_name, None
+
+    text = message.text or ""
+
+    # 2) entities
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                u = entity.user
+                cache_user(message.chat.id, u)
+                return u.id, u.full_name, None
+            if entity.type == "mention":
+                username = text[entity.offset:entity.offset + entity.length]
+                # пробуем найти в кэше
+                uid = resolve_username(message.chat.id, username)
+                if uid:
+                    return uid, username, None
+                return None, username, (
+                    "❌ Не удалось определить ID по @username.\n"
+                    "Пользователь ни разу не писал в этом чате.\n"
+                    "Используй reply или укажи числовой ID."
+                )
+
+    # 3) @username в тексте
+    username = extract_username_from_text(text)
+    if username:
+        uid = resolve_username(message.chat.id, username)
+        if uid:
+            return uid, username, None
+        return None, username, (
+            f"❌ Не удалось найти <code>{username}</code> в кэше чата.\n"
+            "Пользователь должен хоть раз написать сообщение."
+        )
+
+    # 4) числовой ID
+    uid = extract_user_id_from_text(text)
+    if uid:
+        return uid, f"ID {uid}", None
+
+    return None, None, (
+        "❌ Укажи пользователя:\n"
+        "• ответь (reply) на его сообщение\n"
+        "• укажи @username (если он писал в чате)\n"
+        "• укажи числовой ID"
+    )
 
 
 def extract_target_user(message: types.Message):
+    """
+    Старая синхронная функция для КНБ и титулов:
+    reply или text_mention/mention/@username из кэша.
+    """
     if message.reply_to_message and message.reply_to_message.from_user:
         u = message.reply_to_message.from_user
-        return u.id, u.full_name
+        return u.id, u.full_name    text = message.text or ""
 
-    if message.entities and message.text:
+    if message.entities:
         for entity in message.entities:
             if entity.type == "text_mention" and entity.user:
                 u = entity.user
                 return u.id, u.full_name
             if entity.type == "mention":
-                username = message.text[entity.offset:entity.offset + entity.length]
+                username = text[entity.offset:entity.offset + entity.length]
+                uid = resolve_username(message.chat.id, username)
+                if uid:
+                    return uid, username
                 return None, username
+
+    username = extract_username_from_text(text)
+    if username:
+        uid = resolve_username(message.chat.id, username)
+        if uid:
+            return uid, username
+        return None, username
 
     return None, None
 
+
+# ==================== ПРОЧИЕ УТИЛИТЫ ====================
 
 async def is_admin(message: types.Message) -> bool:
     if message.chat.type == ChatType.PRIVATE:
@@ -617,8 +707,12 @@ async def bot_can_delete(message: types.Message) -> bool:
 
 
 def parse_minutes(args: list[str]) -> int | None:
+    """
+    Ищет первое число в аргументах (минуты).
+    Пропускает @username и числовой ID (>= 6 знаков).
+    """
     for a in args[1:]:
-        if a.isdigit():
+        if a.isdigit() and len(a) <= 5:
             n = int(a)
             if n > 0:
                 return n
@@ -638,10 +732,12 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
     return True
 
 
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+# ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    # Кэшируем автора
+    cache_user(message.chat.id, message.from_user)
     await message.answer(
         "👋 Привет! Я бот-цензор и не только.\n\n"
         "🛡 Удаляю мат автоматически (в т.ч. замаскированный)\n"
@@ -663,21 +759,21 @@ async def cmd_help(message: types.Message):
         "/coin — орёл или решка\n"
         "/ball &lt;вопрос&gt; — магический шар\n\n"
         "<b>🔨 Модерация (для админов):</b>\n"
-        "/delete — удалить сообщение (reply) и саму команду\n"
-        "/kick — кикнуть (reply)\n"
-        "/ban — забанить (reply)\n"
-        "/tempban &lt;мин&gt; — временный бан (reply)\n"
-        "/mute &lt;мин&gt; — замутить (reply)\n"
-        "/unmute — снять мут (reply)\n\n"
+        "/delete — удалить сообщение (reply)\n"
+        "/kick @user или reply — кикнуть\n"
+        "/ban @user или reply — забанить\n"
+        "/unban @user или ID — разбанить\n"
+        "/tempban &lt;мин&gt; @user или reply — временный бан\n"
+        "/mute &lt;мин&gt; @user или reply — замутить\n"
+        "/unmute @user или reply — снять мут\n\n"
         "<b>🛡 Управление цензурой (для админов):</b>\n"
         "/censor — включить фильтр мата\n"
         "/uncensor — выключить фильтр мата\n"
         "/censor_status — статус фильтра\n\n"
-        "🇷🇺 <i>Русские алиасы: /кнб /кубик /монетка /шар /удалить /кик /бан /врембан /мут /размут</i>"
+        "💡 <i>По @username работает, если пользователь хоть раз писал "
+        "в этом чате (бот запоминает username). Иначе — только reply или числовой ID.</i>"
     )
 
-
-# ==================== УПРАВЛЕНИЕ ЦЕНЗУРОЙ ====================
 
 @dp.message(Command("censor"))
 @dp.message(Command("цензура"))
@@ -688,7 +784,6 @@ async def cmd_censor_on(message: types.Message):
     if not await is_admin(message):
         await message.reply("❌ Только админы могут управлять цензурой.")
         return
-
     CENSOR_ENABLED[message.chat.id] = True
     await message.answer("✅ Цензура <b>включена</b>. Мат будет удаляться.")
 
@@ -702,7 +797,6 @@ async def cmd_censor_off(message: types.Message):
     if not await is_admin(message):
         await message.reply("❌ Только админы могут управлять цензурой.")
         return
-
     CENSOR_ENABLED[message.chat.id] = False
     await message.answer("🔓 Цензура <b>выключена</b>. Мат больше не удаляется.")
 
@@ -713,8 +807,7 @@ async def cmd_censor_status(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
         await message.answer("❌ Команда работает только в группах.")
         return
-
-    status = censor_enabled(message.chat.id)
+    status = CENSOR_ENABLED.get(message.chat.id, True)
     emoji = "✅" if status else "🔓"
     state = "включена" if status else "выключена"
     await message.answer(f"{emoji} Цензура сейчас <b>{state}</b>.")
@@ -728,18 +821,15 @@ async def cmd_delete(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
         await message.answer("❌ Команда работает только в группах.")
         return
-
     if not await is_admin(message):
         try:
             await message.delete()
         except Exception:
             pass
         return
-
     if not await bot_can_delete(message):
         await message.reply("❌ У меня нет прав на удаление сообщений.")
         return
-
     if not message.reply_to_message:
         try:
             await message.delete()
@@ -748,12 +838,10 @@ async def cmd_delete(message: types.Message):
         return
 
     target_id = message.reply_to_message.message_id
-
     try:
         await bot.delete_message(message.chat.id, target_id)
     except Exception as e:
         logging.warning(f"delete target: {e}")
-
     try:
         await message.delete()
     except Exception as e:
@@ -767,12 +855,7 @@ RPS_CHOICES = {
     "scissors": "✌️ Ножницы",
     "paper": "✋ Бумага",
 }
-
-RPS_BEATS = {
-    "rock": "scissors",
-    "scissors": "paper",
-    "paper": "rock",
-}
+RPS_BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
 
 
 def rps_result(a: str, b: str) -> str:
@@ -800,7 +883,16 @@ def make_game_id(chat_id: int, user_id: int) -> str:
 async def cmd_rps(message: types.Message):
     target_id, target_name = extract_target_user(message)
 
-    if target_id is None and target_name is None:
+    # Если нашли @username, но не нашли ID — предупреждаем
+    if target_id is None and target_name:
+        await message.reply(
+            f"❌ Не удалось найти <code>{target_name}</code> в кэше чата.\n"
+            "Ответь (reply) на его сообщение и напиши /rps."
+        )
+        return
+
+    # Игра с ботом
+    if target_id is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
         RPS_GAMES[game_id] = {
@@ -829,13 +921,6 @@ async def cmd_rps(message: types.Message):
     me = await bot.get_me()
     if target_id == me.id:
         await message.reply("🤖 Чтобы сыграть со мной, напиши просто /rps без аргументов.")
-        return
-
-    if target_id is None:
-        await message.reply(
-            "❌ Не удалось определить пользователя.\n"
-            "Ответь (reply) на его сообщение и напиши /rps."
-        )
         return
 
     game_id = make_game_id(message.chat.id, message.from_user.id)
@@ -881,18 +966,15 @@ async def rps_callback(call: CallbackQuery):
         if user_id != game["player_a"]:
             await call.answer("Эта игра не твоя.", show_alert=True)
             return
-
         player_choice = choice
         bot_choice = game["choice_b"]
         result = rps_result(player_choice, bot_choice)
-
         if result == "draw":
             verdict = "🤝 Ничья!"
         elif result == "a":
             verdict = f"🎉 Победил {game['a_name']}!"
         else:
             verdict = "😢 Победил бот!"
-
         try:
             await call.message.edit_text(
                 f"🎮 <b>КНБ с ботом</b>\n\n"
@@ -924,14 +1006,12 @@ async def rps_callback(call: CallbackQuery):
     if game["choice_a"] is not None and game["choice_b"] is not None:
         ca, cb = game["choice_a"], game["choice_b"]
         result = rps_result(ca, cb)
-
         if result == "draw":
             verdict = "🤝 Ничья!"
         elif result == "a":
             verdict = f"🏆 Победил {game['a_mention']}!"
         else:
             verdict = f"🏆 Победил {game['b_mention']}!"
-
         text = (
             f"🎮 <b>КНБ — результат</b>\n\n"
             f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
@@ -945,11 +1025,7 @@ async def rps_callback(call: CallbackQuery):
         RPS_GAMES.pop(game_id, None)
         return
 
-    if game["choice_a"] is not None:
-        next_name = game["b_mention"]
-    else:
-        next_name = game["a_mention"]
-
+    next_name = game["b_mention"] if game["choice_a"] is not None else game["a_mention"]
     try:
         await call.message.edit_text(
             f"🎮 <b>КНБ</b>\n\n"
@@ -961,7 +1037,7 @@ async def rps_callback(call: CallbackQuery):
         pass
 
 
-# ==================== ПРОЧИЕ РАЗВЛЕКАТЕЛЬНЫЕ ====================
+# ==================== РАЗВЛЕКАТЕЛЬНЫЕ ====================
 
 @dp.message(Command("dice"))
 @dp.message(Command("кубик"))
@@ -985,7 +1061,6 @@ async def cmd_ball(message: types.Message):
     if len(parts) < 2 or not parts[1].strip():
         await message.answer("🔮 Задай вопрос: <code>/ball Я стану миллионером?</code>")
         return
-
     question = parts[1].strip()
     answer = random.choice(MAGIC_8_BALL)
     await message.answer(f"❓ <i>{question}</i>\n\n{answer}")
@@ -1003,11 +1078,10 @@ async def cmd_kick(message: types.Message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
 
-    user_id, name = extract_target_user(message)
-    if user_id is None:
-        await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
         return
-
     if not await check_target(message, user_id, name):
         return
 
@@ -1029,11 +1103,10 @@ async def cmd_ban(message: types.Message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
 
-    user_id, name = extract_target_user(message)
-    if user_id is None:
-        await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
         return
-
     if not await check_target(message, user_id, name):
         return
 
@@ -1042,6 +1115,28 @@ async def cmd_ban(message: types.Message):
         await message.answer(f"🔨 {name} забанен навсегда.")
     except Exception as e:
         await message.reply(f"❌ Не удалось забанить: {e}")
+
+
+@dp.message(Command("unban"))
+@dp.message(Command("разбан"))
+async def cmd_unban(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы могут использовать эту команду.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ У меня нет прав на ограничение участников.")
+        return
+
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
+        return
+
+    try:
+        await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
+        await message.answer(f"🔓 {name} разбанен.")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось разбанить: {e}")
 
 
 @dp.message(Command("tempban"))
@@ -1054,11 +1149,10 @@ async def cmd_tempban(message: types.Message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
 
-    user_id, name = extract_target_user(message)
-    if user_id is None:
-        await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
         return
-
     if not await check_target(message, user_id, name):
         return
 
@@ -1089,11 +1183,10 @@ async def cmd_mute(message: types.Message):
         await message.reply("❌ У меня нет прав на ограничение участников.")
         return
 
-    user_id, name = extract_target_user(message)
-    if user_id is None:
-        await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
         return
-
     if not await check_target(message, user_id, name):
         return
 
@@ -1126,9 +1219,9 @@ async def cmd_unmute(message: types.Message):
         await message.reply("❌ Только админы могут использовать эту команду.")
         return
 
-    user_id, name = extract_target_user(message)
-    if user_id is None:
-        await message.reply("❌ Ответь (reply) на сообщение пользователя.")
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
         return
 
     try:
@@ -1161,13 +1254,18 @@ async def cmd_unmute(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
+    # Кэшируем автора (для резолва @username)
+    if message.from_user:
+        cache_user(message.chat.id, message.from_user)
+    # Кэшируем автора reply-сообщения
+    if message.reply_to_message and message.reply_to_message.from_user:
+        cache_user(message.chat.id, message.reply_to_message.from_user)
+
     if not message.text:
         return
     if message.text.startswith("/"):
         return
-
-    # Проверяем статус цензуры для чата
-    if not censor_enabled(message.chat.id):
+    if not CENSOR_ENABLED.get(message.chat.id, True):
         return
 
     if has_bad_words(message.text):
@@ -1195,11 +1293,12 @@ async def set_commands():
         types.BotCommand(command="censor", description="Включить цензуру"),
         types.BotCommand(command="uncensor", description="Выключить цензуру"),
         types.BotCommand(command="censor_status", description="Статус цензуры"),
-        types.BotCommand(command="kick", description="Кикнуть (reply)"),
-        types.BotCommand(command="ban", description="Забанить (reply)"),
-        types.BotCommand(command="tempban", description="Врембан (reply)"),
-        types.BotCommand(command="mute", description="Мут (reply)"),
-        types.BotCommand(command="unmute", description="Снять мут (reply)"),
+        types.BotCommand(command="kick", description="Кикнуть (@user или reply)"),
+        types.BotCommand(command="ban", description="Забанить (@user или reply)"),
+        types.BotCommand(command="unban", description="Разбанить (@user/ID/reply)"),
+        types.BotCommand(command="tempban", description="Врембан (@user или reply)"),
+        types.BotCommand(command="mute", description="Мут (@user или reply)"),
+        types.BotCommand(command="unmute", description="Снять мут (@user или reply)"),
     ]
     try:
         await bot.set_my_commands(commands)
