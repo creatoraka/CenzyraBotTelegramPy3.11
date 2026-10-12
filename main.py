@@ -37,8 +37,10 @@ USER_ID_TO_NAME = {}
 WARMED_CHATS = set()
 SERVICE_CLEANER_ENABLED = {}
 
-# ==================== BUSINESS ====================
-# {connection_id: {"owner_id": int, "muted": set(user_id)}}
+# Статистика: {chat_id: {user_id: {...}}}
+USER_STATS = {}
+
+# Business
 BUSINESS_CONNECTIONS = {}
 
 BOT_ID = None
@@ -491,6 +493,32 @@ def cache_user(chat_id: int, user: types.User):
     USER_ID_TO_NAME[(chat_id, user.id)] = user.full_name
 
 
+def track_message(chat_id: int, user: types.User, is_bad: bool = False):
+    """Записывает сообщение пользователя в статистику."""
+    if not user or user.is_bot:
+        return
+    stats = USER_STATS.setdefault(chat_id, {})
+    now = datetime.now()
+
+    if user.id not in stats:
+        stats[user.id] = {
+            "messages": 0,
+            "bad_words": 0,
+            "first_seen": now,
+            "last_seen": now,
+            "name": user.full_name,
+            "username": user.username or "",
+        }
+
+    entry = stats[user.id]
+    entry["messages"] += 1
+    if is_bad:
+        entry["bad_words"] += 1
+    entry["last_seen"] = now
+    entry["name"] = user.full_name
+    entry["username"] = user.username or entry["username"]
+
+
 async def warm_cache(chat_id: int):
     if chat_id in WARMED_CHATS:
         return
@@ -633,11 +661,117 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
     return True
 
 
-# ==================== BUSINESS: ПОДКЛЮЧЕНИЕ ====================
+# ==================== СТАТИСТИКА ====================
+
+def human_delta(dt: datetime) -> str:
+    delta = datetime.now() - dt
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return f"{seconds} сек. назад"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} мин. назад"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} ч. назад"
+    days = hours // 24
+    if days < 30:
+        return f"{days} дн. назад"
+    months = days // 30
+    if months < 12:
+        return f"{months} мес. назад"
+    years = days // 365
+    return f"{years} г. назад"
+
+
+def human_date(dt: datetime) -> str:
+    return dt.strftime("%d.%m.%Y %H:%M")
+
+
+async def build_stats_message(message: types.Message, target_id, target_name):
+    chat_id = message.chat.id
+
+    if target_id is None:
+        target_id = message.from_user.id
+        target_name = message.from_user.full_name
+
+    display_name = get_name(chat_id, target_id) if target_id else (target_name or "—")
+    if target_id == message.from_user.id:
+        display_name = message.from_user.full_name
+
+    stats = USER_STATS.get(chat_id, {}).get(target_id)
+    if not stats:
+        return (
+            f"👤 <b>{display_name}</b>\n\n"
+            "📊 Нет данных — этот пользователь ещё не писал в чате "
+            "(статистика ведётся с момента запуска бота)."
+        )
+
+    username_line = f"🔗 @{stats['username']}" if stats["username"] else ""
+    total = stats["messages"]
+    bad = stats["bad_words"]
+    clean = total - bad
+
+    text = (
+        f"👤 <b>{stats['name']}</b>\n"
+        f"{username_line}\n"
+        f"🆔 <code>{target_id}</code>\n\n"
+        f"📊 <b>Статистика в этом чате:</b>\n"
+        f"• Всего сообщений: <b>{total}</b>\n"
+        f"• Чистых: <b>{clean}</b>\n"
+        f"• Нарушений (мат): <b>{bad}</b>\n\n"
+        f"🕐 Первое сообщение: {human_date(stats['first_seen'])}\n"
+        f"   ({human_delta(stats['first_seen'])})\n"
+        f"🕐 Последнее: {human_delta(stats['last_seen'])}"
+    )
+    return text
+
+
+@dp.message(Command("актив"))
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer(await build_stats_message(message, None, None))
+        return
+
+    user_id, name, err = await resolve_target(message)
+    # если аргументов нет и нет reply — показываем про себя
+    if err and not message.reply_to_message:
+        args = (message.text or "").split()
+        if len(args) < 2:
+            user_id, name, err = None, None, None
+
+    if err:
+        await message.reply(err)
+        return
+
+    await message.answer(await build_stats_message(message, user_id, name))
+
+
+@dp.message(Command("whoareyou"))
+@dp.message(Command("ктоты"))
+async def cmd_whoareyou(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer(await build_stats_message(message, None, None))
+        return
+
+    user_id, name, err = await resolve_target(message)
+    if err and not message.reply_to_message:
+        args = (message.text or "").split()
+        if len(args) < 2:
+            user_id, name, err = None, None, None
+
+    if err:
+        await message.reply(err)
+        return
+
+    await message.answer(await build_stats_message(message, user_id, name))
+
+
+# ==================== BUSINESS ====================
 
 @dp.business_connection()
 async def on_business_connection(conn: BusinessConnection):
-    """Срабатывает, когда бота подключают/отключают от Business-аккаунта."""
     logging.info(
         f"Business connection: id={conn.id}, "
         f"user_id={conn.user.id}, enabled={conn.is_enabled}"
@@ -651,22 +785,14 @@ async def on_business_connection(conn: BusinessConnection):
         BUSINESS_CONNECTIONS.pop(conn.id, None)
 
 
-# ==================== BUSINESS: СООБЩЕНИЯ В ЛИЧКЕ ====================
-
 @dp.business_message()
 async def on_business_message(message: types.Message):
-    """
-    Все сообщения в личках, к которым подключён бот.
-    message.from_user.id == owner_id → сообщение от владельца аккаунта
-    message.from_user.id != owner_id → сообщение от собеседника
-    """
     conn_id = message.business_connection_id
     if not conn_id:
         return
 
     conn = BUSINESS_CONNECTIONS.get(conn_id)
     if not conn:
-        # связь не в кэше (например, бот перезапустился)
         try:
             bc = await bot.get_business_connection(conn_id)
             conn = {"owner_id": bc.user.id, "muted": set()}
@@ -678,16 +804,12 @@ async def on_business_message(message: types.Message):
     owner_id = conn["owner_id"]
     text = (message.text or "").strip()
 
-    # ---- команда .мут от владельца ----
     if message.from_user.id == owner_id and text == ".мут":
-        target_id = message.chat.id  # в личке chat.id = id собеседника
-
+        target_id = message.chat.id
         if target_id == owner_id:
             await message.answer("❌ Нельзя замутить самого себя.")
             return
-
         conn["muted"].add(target_id)
-
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
                 text="🔊 Размутить",
@@ -696,24 +818,19 @@ async def on_business_message(message: types.Message):
         ]])
         try:
             await message.answer(
-                f"🔇 Сообщения от этого пользователя теперь удаляются.",
+                "🔇 Сообщения от этого пользователя теперь удаляются.",
                 reply_markup=kb
             )
         except Exception as e:
             logging.warning(f"Не удалось отправить подтверждение: {e}")
         return
 
-    # ---- сообщение от собеседника, который в муте ----
     if message.from_user.id != owner_id:
         if message.from_user.id in conn["muted"]:
             try:
                 await bot.delete_business_messages(
                     business_connection_id=conn_id,
                     message_ids=[message.message_id]
-                )
-                logging.info(
-                    f"Business: удалено сообщение от {message.from_user.id} "
-                    f"в conn {conn_id}"
                 )
             except Exception as e:
                 logging.warning(f"Не удалось удалить business message: {e}")
@@ -725,7 +842,6 @@ async def biz_unmute_callback(call: CallbackQuery):
     if len(parts) != 3:
         await call.answer("Ошибка.", show_alert=True)
         return
-
     _, conn_id, user_id_str = parts
     try:
         user_id = int(user_id_str)
@@ -739,9 +855,8 @@ async def biz_unmute_callback(call: CallbackQuery):
         return
 
     conn["muted"].discard(user_id)
-
     try:
-        await call.message.edit_text("🔊 Пользователь размучен. Сообщения больше не удаляются.")
+        await call.message.edit_text("🔊 Пользователь размучен.")
     except Exception:
         pass
     await call.answer("Готово")
@@ -778,6 +893,12 @@ async def cmd_help(message: types.Message):
         "• /dice — бросить кубик (1–6)\n"
         "• /coin — орёл или решка\n"
         "• /ball &lt;вопрос&gt; — магический шар\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>Статистика:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• /актив или /stats — статистика пользователя\n"
+        "• /whoareyou или «кто ты» — то же самое\n"
+        "• Работает: reply, @username, без аргументов (про себя)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📢 <b>Общее:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1504,6 +1625,7 @@ async def filter_messages(message: types.Message):
         for u in message.new_chat_members:
             cache_user(message.chat.id, u)
 
+    # сервисные — удаляем
     if SERVICE_CLEANER_ENABLED.get(message.chat.id, True) and is_service_message(message):
         try:
             await message.delete()
@@ -1515,14 +1637,43 @@ async def filter_messages(message: types.Message):
         return
     if message.text.startswith("/"):
         return
-    if not CENSOR_ENABLED.get(message.chat.id, True):
+
+    # ---- детектор "кто ты" ----
+    low = message.text.strip().lower()
+    low_clean = low.strip("?!.,;: ")
+    if low_clean in (
+        "кто ты", "кто это", "who are you", "who r u",
+        "кто ты такой", "кто ты такая", "чё ты", "че ты",
+    ):
+        user_id, name, err = await resolve_target(message)
+        if err:
+            user_id, name = None, None
+        text = await build_stats_message(message, user_id, name)
+        try:
+            await message.answer(text)
+        except Exception:
+            pass
         return
-    if has_bad_words(message.text):
+
+    # ---- фильтр мата ----
+    if not CENSOR_ENABLED.get(message.chat.id, True):
+        # цензура выключена — сообщение НЕ удаляется, значит считаем как чистое
+        track_message(message.chat.id, message.from_user, is_bad=False)
+        return
+
+    is_bad = has_bad_words(message.text)
+
+    if is_bad:
+        # сообщение будет удалено — НЕ засчитываем в статистику
         try:
             await message.delete()
             logging.info(f"Удалено от {message.from_user.id} в {message.chat.id}")
         except Exception as e:
             logging.warning(f"Не удалил мат: {e}")
+        return
+
+    # чистое сообщение — считаем
+    track_message(message.chat.id, message.from_user, is_bad=False)
 
 
 # ==================== РЕГИСТРАЦИЯ ====================
@@ -1536,6 +1687,8 @@ async def set_commands():
         types.BotCommand(command="dice", description="Кубик"),
         types.BotCommand(command="coin", description="Орёл/решка"),
         types.BotCommand(command="ball", description="Магический шар"),
+        types.BotCommand(command="stats", description="Статистика пользователя"),
+        types.BotCommand(command="whoareyou", description="Кто этот пользователь"),
         types.BotCommand(command="delete", description="Удалить (reply)"),
         types.BotCommand(command="censor", description="Вкл. цензуру"),
         types.BotCommand(command="uncensor", description="Выкл. цензуру"),
