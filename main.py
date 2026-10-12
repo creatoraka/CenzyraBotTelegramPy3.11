@@ -8,7 +8,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, ChatType
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    BusinessConnection
+)
 
 # ==================== КОНФИГ ====================
 
@@ -31,7 +34,12 @@ RPS_INVITES = {}
 CENSOR_ENABLED = {}
 USERNAME_CACHE = {}
 USER_ID_TO_NAME = {}
+WARMED_CHATS = set()
 SERVICE_CLEANER_ENABLED = {}
+
+# ==================== BUSINESS ====================
+# {connection_id: {"owner_id": int, "muted": set(user_id)}}
+BUSINESS_CONNECTIONS = {}
 
 BOT_ID = None
 
@@ -59,11 +67,8 @@ def normalize(text: str) -> str:
 
 # ==================== МАТ ====================
 
-# Только реальные матерные корни. Без общеупотребительных слов.
 LONG_BAD = [
-    # хуй
     "хуесос", "хуеплет", "хуеглот", "хуемраз",
-    # пизд
     "пизда", "пизде", "пизду", "пизды", "пиздо",
     "пиздец", "пиздану", "пиздато", "пиздатый",
     "пиздюк", "пиздюл", "пиздюх",
@@ -72,7 +77,6 @@ LONG_BAD = [
     "пиздюлина", "пиздюлей", "пиздюли",
     "распизд", "запизд", "впизд", "спизд", "испизд",
     "напизд", "пропизд", "припизд", "допизд",
-    # бля
     "блядина", "блядинк", "блядищ",
     "блядство", "блядств", "блядск", "блядская",
     "блядун", "блядуш",
@@ -80,7 +84,6 @@ LONG_BAD = [
     "забляд", "набляд", "пробляд",
     "выбляд", "выблядок",
     "добляд", "прибляд",
-    # еб
     "ебан", "ебану", "ебанут", "ебанул",
     "ебат", "ебать", "ебал",
     "ебало", "ебальник",
@@ -108,31 +111,25 @@ LONG_BAD = [
     "перееб", "переебал", "переебать", "переебан", "переебу",
     "поебал", "поебать", "поебен", "поебень", "поебон",
     "поебушка", "поебух", "ебалда",
-    # сук
     "сучка", "сучки", "сучонок",
     "сучара", "сучарк", "сучий", "сучья",
-    # муд
     "мудак", "мудачь",
     "мудил", "мудила", "мудило",
     "мудозвон",
     "мудень", "мудня",
     "замуд", "намуд", "промуда",
-    # пидор
     "пидор", "пидар", "пидер",
     "педик", "педер", "педераст",
     "пидорас", "пидарас", "пидорасина",
     "пидорств", "пидарств",
     "пидорок",
-    # гандон
     "гандон", "гондон",
     "кондом",
-    # прочее
     "паскуд", "паскудник",
     "падлюк", "падлюка", "падлючк",
     "гомик", "гомосек",
     "залупка", "залупок",
     "мандавошк", "мандав", "мандуй",
-    # шлюх
     "шлюха", "шлюхи", "шлюхо", "шлюхе", "шлюху",
     "шлюшка", "шлюшки", "шлюшк", "шлюшонок", "шлюшня",
     "пошлюх",
@@ -140,7 +137,6 @@ LONG_BAD = [
     "шалава", "шалавы", "шалавищ",
     "потаскух", "потаскушк",
     "хабалка", "хабалк",
-    # остальное
     "влагалищ",
     "спермат", "сперматозо", "сперматозоид",
     "мошонк", "мошонка",
@@ -245,95 +241,57 @@ LONG_BAD = [
     "изнасил", "изнасилую", "изнасиловать",
 ]
 
-# Короткие корни — только как отдельные слова
 SHORT_BAD = [
-    # хуй
     "хуй", "хуя", "хую", "хуе", "хуи", "хуйн",
     "хуйло", "хуйня", "хуец", "хуищ", "хуяч", "хуяр",
     "хуел", "хуею", "хуев",
     "схуя", "схуй",
-    # хер
     "хер",
-    # пизд
     "пизд", "пизж",
-    # бля — все формы
     "блядь", "бляди", "блядо", "бляде", "бляду",
     "блять", "блят", "бляд", "бля",
-    # еб
     "еб", "ебу", "еби",
-    # сука
     "сука", "суки", "суке", "суку", "сукой", "сучар", "сучк",
     "суч", "засук",
-    # муд
     "мудор",
-    # гандон
     "ганд",
-    # пидор
     "пидр",
-    # гомо
     "гомо",
-    # манда
     "манда", "манде", "манду", "манды", "мандо",
-    # шлюх
     "шлюх", "шлюш",
     "шлюха", "шлюхи", "шлюхе", "шлюху", "шлюхой",
-    # шалав, потаск, хабал
     "шалав", "потаск", "хабал", "стерв",
     "курв", "курва", "курвы", "курво",
-    # блуд
     "блуд",
-    # вагин, сперм
     "вагин", "вагина",
     "сперм", "сперма",
-    # яичк
     "яичк",
-    # срак, срал, срач
     "срак",
     "сру", "срал",
     "срач", "срачь",
-    # сса
     "ссат", "ссал", "ссан", "ссани",
     "ссик", "ссику",
-    # перд, бзд
     "перд", "пердну", "бзд",
-    # вонюч
     "вонюч",
-    # моча
     "моча", "мочит", "мочен",
-    # жоп
     "жоп",
-    # анал
     "анал",
-    # анус
     "анус",
-    # дроч
     "дроч",
-    # онан
     "онан",
-    # фелл
     "фелл",
-    # орал
     "орал",
-    # секс
     "секс", "секса", "сексу", "сексе",
-    # снош
     "снош",
-    # трах
     "трах", "трахн",
-    # шмар
     "шмар",
-    # нации
     "кацап", "жид",
     "чурка", "чурки", "чурк",
     "хач", "хачи",
     "азерб", "узбек", "немч", "наци",
-    # наркота
     "нарк", "нарко", "торч",
-    # оружие/тема
     "бомб", "бомба", "игил",
-    # педо
     "педо",
-    # оскорбления короткие
     "мраз", "твар",
     "урод", "уроды", "уродина",
     "дрян", "дрянь", "дрянн",
@@ -342,98 +300,71 @@ SHORT_BAD = [
     "хам", "хамл", "хамск",
     "наглец", "нагл",
     "нахал", "наха",
-    # залупа
     "залупа", "залупе", "залупу", "залупы", "залупой",
-    # угрозы (только явные)
     "убью",
     "порву", "порвать",
     "сожгу", "сжечь",
 ]
 
-# Whitelist — обычные слова, которые могут содержать "опасные" корни.
 WHITELIST_RAW = {
-    # херсон / хер
     "херсон", "херсонес", "херсонский", "херсонская", "херсонский",
-    # мандарин
     "мандарин", "мандарины", "мандаринка", "мандаринка",
     "мандариновый", "мандаринчик", "мандаринчики",
-    # анализ
     "анализ", "анализа", "анализу", "анализом", "анализе",
     "аналитик", "аналитика", "аналитики", "аналитику",
     "анализировать", "анализировал", "анализирую",
     "аналог", "аналога", "аналогия", "аналогичный", "аналогично",
     "аналоговый",
-    # трахея
     "трахея", "трахеи", "трахею", "трахеей", "трахеит",
     "трахеотомия", "трахеостомия",
-    # секс / секстант
     "секстант", "секстанта", "секстанты",
     "секция", "секции", "секцию", "секций", "секционный",
     "секрет", "секрета", "секретный", "секретно",
     "секретарь", "секретариат",
-    # сук
     "сукаленок", "сукаленка",
     "сукно", "сукна", "сукном", "сукне",
     "суккулент", "суккуленты",
     "сукровица",
-    # сракозябра
     "сракозябра", "сракозябры",
-    # полов
     "половой", "половая", "половое", "половые", "половых",
     "половинка", "половина", "половину", "половины",
     "половник", "половники",
-    # орал
     "оральный", "оральная", "оральное", "оральные",
     "орал", "орала", "орали", "орать",
-    # снош
     "сношение", "сношения", "сношению", "сношением",
     "сносно", "сносный", "сносная", "сносное", "сносные",
     "сноска", "сноски", "сноску",
-    # дешевк
     "дешевка", "дешевки", "дешевке", "дешевку", "дешевкой",
     "дешевле", "дешевый", "дешевая", "дешево",
-    # соль
     "соль", "соли", "солью",
     "соленый", "соленая", "соленое",
     "солнечный", "солнечная", "солнце",
-    # анальный
     "анальный", "анальная", "анальное", "анальные",
-    # вагина / клитор
     "вагина", "вагины", "вагине", "вагину", "вагиной",
     "вагинальный", "вагинальная",
     "клитор", "клитора", "клиторе", "клитору", "клитором",
     "клиторальный",
-    # фаллос / пенис
     "фаллос", "фаллоса", "фаллосу", "фаллосом",
     "пенис", "пениса", "пенису", "пенисом",
     "пенистый", "пенистая",
-    # секс
     "сексуальный", "сексуальная", "сексуальное", "сексуальные",
     "сексуальность", "сексуально",
-    # мастурбация
     "мастурбация", "мастурбации", "мастурбацию",
-    # наркотик
     "наркотик", "наркотики", "наркотика", "наркотиков",
     "наркоз", "наркоза", "наркозный",
-    # хамство
     "хамство", "хамства", "хамству", "хамством",
-    # поганец
     "поганец", "поганка", "поганки",
     "поганый", "поганая", "поганое", "поганые",
-    # трава
     "трава", "травы", "траве", "траву", "травой", "травам", "травах",
     "травинка", "травинки", "травинку",
     "травля", "травли", "травлю",
     "травма", "травмы", "травме", "травму", "травмой",
     "травматолог", "травматология",
     "траверс", "траверса",
-    # лупа
     "лупа", "лупы", "лупе", "лупу", "лупой",
     "лупить", "луплю", "лупит",
-    # муравей
     "муравей", "муравья", "муравью", "муравьи", "муравьёв", "муравьев",
     "муравьиный", "муравьиная", "муравейник", "муравейника",
-    # суккулент
     "суккулент", "суккуленты", "суккулентный",
 }
 
@@ -441,14 +372,6 @@ WHITELIST = {normalize(w) for w in WHITELIST_RAW}
 
 
 def has_bad_words(text: str) -> bool:
-    """
-    Логика:
-    1. Разбиваем текст на слова. Каждое нормализуем.
-    2. Длинные корни — подстрокой в слове.
-    3. Короткие корни — точное совпадение со словом.
-    4. Обход "б л я т ь" (все слова ≤2 букв) — склеиваем и ищем.
-    5. Обход "б-л-я-т-ь" (без пробелов) — склеиваем и ищем.
-    """
     if not text:
         return False
 
@@ -458,11 +381,9 @@ def has_bad_words(text: str) -> bool:
     if not norm_words:
         return False
 
-    # Если весь текст — одно whitelist-слово → не мат
     if len(norm_words) == 1 and norm_words[0] in WHITELIST:
         return False
 
-    # 1) длинные корни — подстрокой
     for w in norm_words:
         if w in WHITELIST:
             continue
@@ -470,14 +391,12 @@ def has_bad_words(text: str) -> bool:
             if bad in w:
                 return True
 
-    # 2) короткие — точное совпадение со словом
     for w in norm_words:
         if w in WHITELIST:
             continue
         if w in SHORT_BAD:
             return True
 
-    # 3) обход "б л я т ь" — все слова короткие
     all_short = all(len(w) <= 2 for w in norm_words)
     if all_short and len(norm_words) >= 2:
         flat = normalize(text)
@@ -489,7 +408,6 @@ def has_bad_words(text: str) -> bool:
                 if bad in flat:
                     return True
 
-    # 4) обход "б-л-я-т-ь" — без пробелов вообще
     if " " not in text.strip():
         flat = normalize(text)
         if flat and flat not in WHITELIST:
@@ -573,6 +491,19 @@ def cache_user(chat_id: int, user: types.User):
     USER_ID_TO_NAME[(chat_id, user.id)] = user.full_name
 
 
+async def warm_cache(chat_id: int):
+    if chat_id in WARMED_CHATS:
+        return
+    WARMED_CHATS.add(chat_id)
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if not admin.user.is_bot:
+                cache_user(chat_id, admin.user)
+    except Exception as e:
+        logging.warning(f"warm_cache({chat_id}): {e}")
+
+
 def resolve_username(chat_id: int, username: str):
     if not username:
         return None
@@ -622,6 +553,7 @@ async def resolve_target(message: types.Message):
                 return None, username, (
                     f"❌ Не удалось найти <code>{username}</code>.\n"
                     "Пользователь должен хоть раз написать в этом чате.\n"
+                    "Проверь кэш: /users\n"
                     "Или используй reply / числовой ID."
                 )
 
@@ -631,7 +563,9 @@ async def resolve_target(message: types.Message):
         if uid:
             return uid, get_name(chat_id, uid), None
         return None, username, (
-            f"❌ Не удалось найти <code>{username}</code> в кэше чата."
+            f"❌ Не удалось найти <code>{username}</code> в кэше.\n"
+            "Проверь кэш: /users\n"
+            "Или используй reply / числовой ID."
         )
 
     uid = extract_user_id_from_text(text)
@@ -641,7 +575,7 @@ async def resolve_target(message: types.Message):
     return None, None, (
         "❌ Укажи пользователя:\n"
         "• ответь (reply) на его сообщение\n"
-        "• укажи @username (если писал в чате)\n"
+        "• укажи @username (см. /users)\n"
         "• укажи числовой ID"
     )
 
@@ -699,6 +633,120 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
     return True
 
 
+# ==================== BUSINESS: ПОДКЛЮЧЕНИЕ ====================
+
+@dp.business_connection()
+async def on_business_connection(conn: BusinessConnection):
+    """Срабатывает, когда бота подключают/отключают от Business-аккаунта."""
+    logging.info(
+        f"Business connection: id={conn.id}, "
+        f"user_id={conn.user.id}, enabled={conn.is_enabled}"
+    )
+    if conn.is_enabled:
+        BUSINESS_CONNECTIONS[conn.id] = {
+            "owner_id": conn.user.id,
+            "muted": set(),
+        }
+    else:
+        BUSINESS_CONNECTIONS.pop(conn.id, None)
+
+
+# ==================== BUSINESS: СООБЩЕНИЯ В ЛИЧКЕ ====================
+
+@dp.business_message()
+async def on_business_message(message: types.Message):
+    """
+    Все сообщения в личках, к которым подключён бот.
+    message.from_user.id == owner_id → сообщение от владельца аккаунта
+    message.from_user.id != owner_id → сообщение от собеседника
+    """
+    conn_id = message.business_connection_id
+    if not conn_id:
+        return
+
+    conn = BUSINESS_CONNECTIONS.get(conn_id)
+    if not conn:
+        # связь не в кэше (например, бот перезапустился)
+        try:
+            bc = await bot.get_business_connection(conn_id)
+            conn = {"owner_id": bc.user.id, "muted": set()}
+            BUSINESS_CONNECTIONS[conn_id] = conn
+        except Exception as e:
+            logging.warning(f"Не удалось получить business connection: {e}")
+            return
+
+    owner_id = conn["owner_id"]
+    text = (message.text or "").strip()
+
+    # ---- команда .мут от владельца ----
+    if message.from_user.id == owner_id and text == ".мут":
+        target_id = message.chat.id  # в личке chat.id = id собеседника
+
+        if target_id == owner_id:
+            await message.answer("❌ Нельзя замутить самого себя.")
+            return
+
+        conn["muted"].add(target_id)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🔊 Размутить",
+                callback_data=f"biz_unmute:{conn_id}:{target_id}"
+            )
+        ]])
+        try:
+            await message.answer(
+                f"🔇 Сообщения от этого пользователя теперь удаляются.",
+                reply_markup=kb
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось отправить подтверждение: {e}")
+        return
+
+    # ---- сообщение от собеседника, который в муте ----
+    if message.from_user.id != owner_id:
+        if message.from_user.id in conn["muted"]:
+            try:
+                await bot.delete_business_messages(
+                    business_connection_id=conn_id,
+                    message_ids=[message.message_id]
+                )
+                logging.info(
+                    f"Business: удалено сообщение от {message.from_user.id} "
+                    f"в conn {conn_id}"
+                )
+            except Exception as e:
+                logging.warning(f"Не удалось удалить business message: {e}")
+
+
+@dp.callback_query(lambda c: c.data.startswith("biz_unmute:"))
+async def biz_unmute_callback(call: CallbackQuery):
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        await call.answer("Ошибка.", show_alert=True)
+        return
+
+    _, conn_id, user_id_str = parts
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await call.answer("Ошибка.", show_alert=True)
+        return
+
+    conn = BUSINESS_CONNECTIONS.get(conn_id)
+    if not conn:
+        await call.answer("Соединение неактивно.", show_alert=True)
+        return
+
+    conn["muted"].discard(user_id)
+
+    try:
+        await call.message.edit_text("🔊 Пользователь размучен. Сообщения больше не удаляются.")
+    except Exception:
+        pass
+    await call.answer("Готово")
+
+
 # ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -711,6 +759,8 @@ async def cmd_start(message: types.Message):
         "📢 Созываю всех через /everyone\n"
         "🎲 Развлекательные команды\n"
         "🔨 Модерация\n\n"
+        "💼 Если я подключён к твоему Business-аккаунту, "
+        "напиши мне в личку <code>.мут</code> — и все сообщения собеседника будут удаляться.\n\n"
         "📌 /help для списка команд."
     )
 
@@ -733,6 +783,11 @@ async def cmd_help(message: types.Message):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• /everyone — созвать всех участников\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        "💼 <b>Business-режим (в личке):</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• <code>.мут</code> — удалять все сообщения собеседника\n"
+        "• кнопка «🔊 Размутить» — вернуть всё как было\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
         "🔨 <b>Администрация:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "<b>Удаление:</b>\n"
@@ -743,7 +798,9 @@ async def cmd_help(message: types.Message):
         "• /unban — разбанить (@user или ID)\n"
         "• /tempban &lt;мин&gt; — временный бан\n"
         "• /mute &lt;мин&gt; — мут (заглушить)\n"
-        "• /unmute — снять мут\n\n"
+        "• /vmute &lt;мин&gt; — мут голосовых\n"
+        "• /unmute — снять все муты\n"
+        "• /users — кого бот знает (для @username)\n\n"
         "<b>Управление ботом:</b>\n"
         "• /censor — включить цензуру\n"
         "• /uncensor — выключить цензуру\n"
@@ -813,7 +870,29 @@ async def cmd_service_status(message: types.Message):
     await message.answer(f"Чистка сервисных: {'✅ вкл' if status else '🔓 выкл'}")
 
 
-# ==================== /everyone ====================
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+
+    await warm_cache(message.chat.id)
+    cache = USERNAME_CACHE.get(message.chat.id, {})
+    if not cache:
+        await message.answer("👥 Кэш пуст. Пока никто не писал в чате.")
+        return
+
+    lines = []
+    for uname, uid in sorted(cache.items()):
+        name = get_name(message.chat.id, uid)
+        lines.append(f"• @{uname} — {name}")
+    text = "👥 <b>Кэш пользователей:</b>\n\n" + "\n".join(lines[:60])
+    if len(lines) > 60:
+        text += f"\n\n…и ещё {len(lines) - 60}"
+    await message.answer(text)
+
 
 @dp.message(Command("everyone"))
 @dp.message(Command("все"))
@@ -824,6 +903,7 @@ async def cmd_everyone(message: types.Message):
         await message.reply("❌ Только админы могут созывать всех.")
         return
 
+    await warm_cache(message.chat.id)
     chat_id = message.chat.id
     user_ids = set()
 
@@ -872,8 +952,6 @@ async def cmd_everyone(message: types.Message):
     except Exception as e:
         await message.reply(f"❌ {e}")
 
-
-# ==================== /delete ====================
 
 @dp.message(Command("delete"))
 async def cmd_delete(message: types.Message):
@@ -942,10 +1020,8 @@ async def cmd_rps(message: types.Message):
         return
 
     cache_user(message.chat.id, message.from_user)
-
     target_id, target_name = await resolve_target_for_rps(message)
 
-    # Игра с ботом
     if target_id is None:
         game_id = make_game_id(message.chat.id, message.from_user.id)
         bot_choice_key = random.choice(list(RPS_CHOICES.keys()))
@@ -977,7 +1053,6 @@ async def cmd_rps(message: types.Message):
         await message.reply("🤖 Чтобы сыграть со мной, напиши /rps без аргументов.")
         return
 
-    # PvP — приглашение
     invite_id = f"{message.chat.id}_{random.randint(1000000, 9999999)}"
     RPS_INVITES[invite_id] = {
         "chat_id": message.chat.id,
@@ -1034,7 +1109,6 @@ async def resolve_target_for_rps(message: types.Message):
 
 @dp.callback_query()
 async def rps_callback(call: CallbackQuery):
-    # ---- приглашение ----
     if call.data.startswith("rpsi:"):
         parts = call.data.split(":")
         if len(parts) != 3:
@@ -1055,7 +1129,8 @@ async def rps_callback(call: CallbackQuery):
                 await call.message.edit_text(
                     f"🎮 <b>КНБ</b>\n\n"
                     f"❌ <a href=\"tg://user?id={invite['to_id']}\">{invite['to_name']}</a> "
-                    f"отклонил приглашение от {invite['from_mention']}."
+                    f"отклонил приглашение от {invite['from_mention']}.",
+                    reply_markup=None
                 )
             except Exception:
                 pass
@@ -1091,7 +1166,6 @@ async def rps_callback(call: CallbackQuery):
         RPS_INVITES.pop(invite_id, None)
         return
 
-    # ---- сама игра ----
     if call.data.startswith("rps:"):
         parts = call.data.split(":")
         if len(parts) != 3:
@@ -1101,7 +1175,11 @@ async def rps_callback(call: CallbackQuery):
         _, game_id, choice = parts
         game = RPS_GAMES.get(game_id)
         if not game:
-            await call.answer("Игра не найдена.", show_alert=True)
+            await call.answer("Игра завершена.", show_alert=True)
+            try:
+                await call.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             return
 
         user_id = call.from_user.id
@@ -1122,7 +1200,8 @@ async def rps_callback(call: CallbackQuery):
                 await call.message.edit_text(
                     f"🎮 <b>КНБ</b>\n\n"
                     f"👤 {RPS_CHOICES[choice]}\n🤖 {RPS_CHOICES[bot_choice]}\n\n"
-                    f"<b>{verdict}</b>"
+                    f"<b>{verdict}</b>",
+                    reply_markup=None
                 )
             except Exception:
                 pass
@@ -1135,7 +1214,6 @@ async def rps_callback(call: CallbackQuery):
             await call.answer("Не участник.", show_alert=True)
             return
 
-        # Проверка хода
         if game["turn"] != slot:
             await call.answer("Сейчас не твой ход!", show_alert=True)
             return
@@ -1161,7 +1239,8 @@ async def rps_callback(call: CallbackQuery):
                     f"🎮 <b>КНБ результат</b>\n\n"
                     f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
                     f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n"
-                    f"<b>{verdict}</b>"
+                    f"<b>{verdict}</b>",
+                    reply_markup=None
                 )
             except Exception:
                 pass
@@ -1319,7 +1398,7 @@ async def cmd_mute(message: types.Message):
         return
     minutes = parse_minutes((message.text or "").split())
     if not minutes:
-        await message.reply("❌ Укажи минуты: /mute 15")
+        await message.reply("❌ Укажи минуты: /mute @user 15")
         return
     try:
         until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
@@ -1330,6 +1409,51 @@ async def cmd_mute(message: types.Message):
             until_date=until_ts
         )
         await message.answer(f"🔇 {name} замучен на <b>{minutes} мин.</b>")
+    except Exception as e:
+        await message.reply(f"❌ {e}")
+
+
+@dp.message(Command("vmute"))
+async def cmd_vmute(message: types.Message):
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    if not await bot_can_restrict(message):
+        await message.reply("❌ Нет прав.")
+        return
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
+        return
+    if not await check_target(message, user_id, name):
+        return
+    minutes = parse_minutes((message.text or "").split())
+    if not minutes:
+        await message.reply("❌ Укажи минуты: /vmute @user 15")
+        return
+    try:
+        until_ts = int((datetime.now() + timedelta(minutes=minutes)).timestamp())
+        await bot.restrict_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            permissions=types.ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+            ),
+            until_date=until_ts
+        )
+        await message.answer(f"🎙 {name} — мут голосовых на <b>{minutes} мин.</b>")
     except Exception as e:
         await message.reply(f"❌ {e}")
 
@@ -1363,7 +1487,7 @@ async def cmd_unmute(message: types.Message):
                 can_pin_messages=False,
             )
         )
-        await message.answer(f"🔊 {name} размучен.")
+        await message.answer(f"🔊 {name} размучен (все права возвращены).")
     except Exception as e:
         await message.reply(f"❌ {e}")
 
@@ -1376,6 +1500,9 @@ async def filter_messages(message: types.Message):
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
         cache_user(message.chat.id, message.reply_to_message.from_user)
+    if message.new_chat_members:
+        for u in message.new_chat_members:
+            cache_user(message.chat.id, u)
 
     if SERVICE_CLEANER_ENABLED.get(message.chat.id, True) and is_service_message(message):
         try:
@@ -1416,11 +1543,13 @@ async def set_commands():
         types.BotCommand(command="service_on", description="Вкл. чистку"),
         types.BotCommand(command="service_off", description="Выкл. чистку"),
         types.BotCommand(command="service_status", description="Статус чистки"),
+        types.BotCommand(command="users", description="Кого знает бот"),
         types.BotCommand(command="kick", description="Кик"),
         types.BotCommand(command="ban", description="Бан"),
         types.BotCommand(command="unban", description="Разбан"),
         types.BotCommand(command="tempban", description="Врембан"),
         types.BotCommand(command="mute", description="Мут"),
+        types.BotCommand(command="vmute", description="Мут голосовых"),
         types.BotCommand(command="unmute", description="Размут"),
     ]
     try:
