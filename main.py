@@ -39,7 +39,7 @@ SERVICE_CLEANER_ENABLED = {}
 
 USER_STATS = {}
 
-# Business: {connection_id: {"owner_id": int, "muted": set(user_id), "can_delete": bool}}
+# Business
 BUSINESS_CONNECTIONS = {}
 
 BOT_ID = None
@@ -765,7 +765,7 @@ async def cmd_whoareyou(message: types.Message):
     await message.answer(await build_stats_message(message, user_id, name))
 
 
-# ==================== BUSINESS ====================
+# ==================== BUSINESS: ХЕЛП-ТЕКСТ ====================
 
 BUSINESS_HELP_TEXT = (
     "💼 <b>Business-бот — команды в личке</b>\n\n"
@@ -773,24 +773,27 @@ BUSINESS_HELP_TEXT = (
     "<b>Мут собеседника</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "• <code>.мут</code> — удалять все сообщения собеседника\n"
-    "  (напиши сам в личке с кем-то)\n"
     "• Кнопка «🔊 Размутить» — снять мут\n"
-    "• Собеседник тоже может размутить себя сам — "
-    "он получит кнопку «🔊 Размутить себя»\n\n"
+    "• Собеседник может размутить себя сам — кнопка появится у него\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "<b>Прочее</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
-    "• <code>.хелп</code> или <code>.help</code> — этот список\n"
-    "• <code>.мут</code> — включить мут собеседника\n\n"
+    "• <code>.хелп</code> или <code>.help</code> — этот список\n\n"
     "💡 <i>Работает только в Business-режиме с Telegram Premium.</i>"
 )
 
 
+# ==================== BUSINESS: ХЕНДЛЕРЫ ====================
+
 @dp.business_connection()
 async def on_business_connection(conn: BusinessConnection):
     logging.info(
-        f"Business connection: id={conn.id}, "
-        f"user_id={conn.user.id}, enabled={conn.is_enabled}"
+        f"=== BUSINESS CONNECTION ===\n"
+        f"id={conn.id}\n"
+        f"user_id={conn.user.id} (@{conn.user.username})\n"
+        f"enabled={conn.is_enabled}\n"
+        f"can_reply={getattr(conn, 'can_reply', None)}\n"
+        f"can_delete_all_messages={getattr(conn, 'can_delete_all_messages', None)}"
     )
     if conn.is_enabled:
         BUSINESS_CONNECTIONS[conn.id] = {
@@ -798,15 +801,11 @@ async def on_business_connection(conn: BusinessConnection):
             "muted": set(),
             "can_delete": bool(getattr(conn, "can_delete_all_messages", False)),
         }
-        logging.info(
-            f"can_delete_all_messages={BUSINESS_CONNECTIONS[conn.id]['can_delete']}"
-        )
     else:
         BUSINESS_CONNECTIONS.pop(conn.id, None)
 
 
 async def get_business_conn(conn_id: str):
-    """Возвращает dict или подгружает из API."""
     conn = BUSINESS_CONNECTIONS.get(conn_id)
     if conn:
         return conn
@@ -824,193 +823,227 @@ async def get_business_conn(conn_id: str):
         return None
 
 
-async def business_help(message: types.Message, conn_id: str):
-    """Показывает .хелп в личке и удаляет вызвавшую команду."""
-    # удаляем сообщение с командой
+async def try_delete_business(conn_id: str, message_id: int) -> bool:
+    """Пытается удалить business-сообщение. Возвращает True при успехе."""
     try:
         await bot.delete_business_messages(
             business_connection_id=conn_id,
-            message_ids=[message.message_id]
+            message_ids=[message_id]
         )
+        return True
     except Exception as e:
-        logging.warning(f"Не удалось удалить команду .хелп: {e}")
-
-    # отправляем help
-    try:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text=BUSINESS_HELP_TEXT,
-        )
-    except Exception as e:
-        logging.warning(f"Не удалось отправить .хелп: {e}")
+        logging.warning(f"delete_business_messages failed: {e}")
+        return False
 
 
 @dp.business_message()
 async def on_business_message(message: types.Message):
-    conn_id = message.business_connection_id
-    if not conn_id:
-        return
+    """Обработка ВСЕХ сообщений в Business-личках."""
+    try:
+        conn_id = message.business_connection_id
+        user_id = message.from_user.id if message.from_user else None
+        text = (message.text or "").strip()
+        text_low = text.lower()
 
-    conn = await get_business_conn(conn_id)
-    if not conn:
-        return
+        logging.info(
+            f"=== BUSINESS MESSAGE ===\n"
+            f"conn_id={conn_id}\n"
+            f"user_id={user_id}\n"
+            f"chat_id={message.chat.id}\n"
+            f"text={text!r}"
+        )
 
-    owner_id = conn["owner_id"]
-    text = (message.text or "").strip().lower()
-
-    # ---------- .help / .хелп ----------
-    if text in (".help", ".хелп"):
-        await business_help(message, conn_id)
-        return
-
-    # ---------- .мут от владельца ----------
-    if message.from_user.id == owner_id and text == ".мут":
-        target_id = message.chat.id  # в личке chat.id = собеседник
-        target_name = message.chat.full_name or "собеседник"
-
-        if target_id == owner_id:
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text="❌ Нельзя замутить самого себя."
-            )
+        if not conn_id:
+            logging.warning("Нет conn_id в business message")
             return
 
-        conn["muted"].add(target_id)
+        conn = await get_business_conn(conn_id)
+        if not conn:
+            logging.warning(f"Не найден conn {conn_id}")
+            return
 
-        # кнопка для владельца
-        kb_owner = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="🔊 Размутить",
-                callback_data=f"biz_unmute:{conn_id}:{target_id}"
-            )
-        ]])
+        owner_id = conn["owner_id"]
+        is_from_owner = (user_id == owner_id)
 
-        # кнопка для собеседника — он сам себя размутит
-        kb_target = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="🔊 Размутить себя",
-                callback_data=f"biz_selfunmute:{conn_id}:{target_id}"
-            )
-        ]])
+        logging.info(
+            f"owner_id={owner_id}, is_from_owner={is_from_owner}, "
+            f"muted={conn['muted']}, can_delete={conn.get('can_delete')}"
+        )
 
-        can_del = conn.get("can_delete", False)
-        warning = ""
-        if not can_del:
-            warning = (
-                "\n\n⚠️ <b>Внимание:</b> боту не выдано право "
-                "«Удаление сообщений». Сообщения собеседника НЕ будут удаляться. "
-                "Включи право в настройках Telegram Business → Чат-боты."
-            )
+        # ---------- .help / .хелп ----------
+        if text_low in (".help", ".хелп"):
+            logging.info("Обработка .help / .хелп")
+            # удаляем команду (если можем)
+            await try_delete_business(conn_id, message.message_id)
 
-        try:
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text=(
-                    f"🔇 Мут включён для <b>{target_name}</b>.\n"
-                    f"Теперь его сообщения будут удаляться."
-                    f"{warning}"
-                ),
-                reply_markup=kb_owner
-            )
-        except Exception as e:
-            logging.warning(f"Не удалось отправить подтверждение: {e}")
-
-        # отправим собеседнику отдельное уведомление с кнопкой самому размутиться
-        # (в этом же чате, через Business — сообщение увидят оба)
-        try:
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text=(
-                    "ℹ️ Если тебе это не нравится — можешь размутить себя сам:"
-                ),
-                reply_markup=kb_target
-            )
-        except Exception as e:
-            logging.warning(f"Не удалось отправить кнопку для собеседника: {e}")
-        return
-
-    # ---------- сообщения от собеседника ----------
-    if message.from_user.id != owner_id:
-        if message.from_user.id in conn["muted"]:
+            # отправляем список
             try:
-                await bot.delete_business_messages(
-                    business_connection_id=conn_id,
-                    message_ids=[message.message_id]
-                )
-                logging.info(
-                    f"Business: удалено сообщение от {message.from_user.id} "
-                    f"в conn {conn_id}"
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    text=BUSINESS_HELP_TEXT,
                 )
             except Exception as e:
-                logging.warning(
-                    f"Не удалось удалить business message: {e}\n"
-                    f"Проверь право can_delete_all_messages у бота."
+                logging.warning(f"Не удалось отправить .хелп: {e}")
+            return
+
+        # ---------- .мут от владельца ----------
+        if is_from_owner and text_low == ".мут":
+            logging.info("Обработка .мут")
+
+            target_id = message.chat.id  # в личке chat.id = собеседник
+            target_name = message.chat.full_name or "собеседник"
+
+            if target_id == owner_id:
+                try:
+                    await bot.send_message(
+                        chat_id=message.chat.id,
+                        text="❌ Нельзя замутить самого себя."
+                    )
+                except Exception:
+                    pass
+                return
+
+            conn["muted"].add(target_id)
+
+            # удаляем команду .мут, если можем
+            await try_delete_business(conn_id, message.message_id)
+
+            can_del = conn.get("can_delete", False)
+            warning = ""
+            if not can_del:
+                warning = (
+                    "\n\n⚠️ <b>Внимание:</b> боту не выдано право "
+                    "«Удаление сообщений». Сообщения собеседника НЕ будут удаляться. "
+                    "Включи право в Telegram Business → Чат-боты."
                 )
 
+            # кнопка для владельца
+            kb_owner = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔊 Размутить",
+                    callback_data=f"biz_unmute:{conn_id}:{target_id}"
+                )
+            ]])
+
+            # кнопка для собеседника
+            kb_target = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔊 Размутить себя",
+                    callback_data=f"biz_selfunmute:{conn_id}:{target_id}"
+                )
+            ]])
+
+            try:
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    text=(
+                        f"🔇 Мут включён для <b>{target_name}</b>.\n"
+                        f"Теперь его сообщения будут удаляться."
+                        f"{warning}"
+                    ),
+                    reply_markup=kb_owner
+                )
+            except Exception as e:
+                logging.warning(f"Не отправилось подтверждение владельцу: {e}")
+
+            try:
+                await bot.send_message(
+                    chat_id=message.chat.id,
+                    text="ℹ️ Если тебе это не нравится — можешь размутить себя сам:",
+                    reply_markup=kb_target
+                )
+            except Exception as e:
+                logging.warning(f"Не отправилось сообщение собеседнику: {e}")
+            return
+
+        # ---------- сообщение от собеседника в муте ----------
+        if not is_from_owner and user_id in conn["muted"]:
+            logging.info(f"Удаляю сообщение замученного {user_id}")
+            ok = await try_delete_business(conn_id, message.message_id)
+            if not ok:
+                logging.warning(
+                    "Сообщение не удалено. Проверь право can_delete_all_messages у бота."
+                )
+            return
+
+        # ---------- остальные сообщения — игнор ----------
+        logging.info("Business message без команды — игнор")
+
+    except Exception as e:
+        logging.error(f"Ошибка в on_business_message: {e}", exc_info=True)
+
+
+# ==================== BUSINESS: CALLBACK ====================
 
 @dp.callback_query(lambda c: c.data.startswith("biz_unmute:"))
 async def biz_unmute_callback(call: CallbackQuery):
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer("Ошибка.", show_alert=True)
-        return
-    _, conn_id, user_id_str = parts
     try:
-        user_id = int(user_id_str)
-    except ValueError:
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка.", show_alert=True)
+            return
+        _, conn_id, user_id_str = parts
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            await call.answer("Ошибка.", show_alert=True)
+            return
+
+        conn = await get_business_conn(conn_id)
+        if not conn:
+            await call.answer("Соединение неактивно.", show_alert=True)
+            return
+
+        if call.from_user.id != conn["owner_id"]:
+            await call.answer(
+                "Размутить может только владелец. Используй «Размутить себя».",
+                show_alert=True
+            )
+            return
+
+        conn["muted"].discard(user_id)
+        try:
+            await call.message.edit_text("🔊 Пользователь размучен. Сообщения больше не удаляются.")
+        except Exception:
+            pass
+        await call.answer("Готово")
+    except Exception as e:
+        logging.error(f"biz_unmute error: {e}", exc_info=True)
         await call.answer("Ошибка.", show_alert=True)
-        return
-
-    conn = await get_business_conn(conn_id)
-    if not conn:
-        await call.answer("Соединение неактивно.", show_alert=True)
-        return
-
-    # размутить может только владелец
-    if call.from_user.id != conn["owner_id"]:
-        await call.answer(
-            "Размутить может только владелец. Используй «Размутить себя».",
-            show_alert=True
-        )
-        return
-
-    conn["muted"].discard(user_id)
-    try:
-        await call.message.edit_text("🔊 Пользователь размучен. Сообщения больше не удаляются.")
-    except Exception:
-        pass
-    await call.answer("Готово")
 
 
 @dp.callback_query(lambda c: c.data.startswith("biz_selfunmute:"))
 async def biz_selfunmute_callback(call: CallbackQuery):
-    parts = call.data.split(":")
-    if len(parts) != 3:
-        await call.answer("Ошибка.", show_alert=True)
-        return
-    _, conn_id, user_id_str = parts
     try:
-        user_id = int(user_id_str)
-    except ValueError:
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка.", show_alert=True)
+            return
+        _, conn_id, user_id_str = parts
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            await call.answer("Ошибка.", show_alert=True)
+            return
+
+        conn = await get_business_conn(conn_id)
+        if not conn:
+            await call.answer("Соединение неактивно.", show_alert=True)
+            return
+
+        if call.from_user.id != user_id:
+            await call.answer("Эта кнопка не для тебя.", show_alert=True)
+            return
+
+        conn["muted"].discard(user_id)
+        try:
+            await call.message.edit_text("🔊 Ты размутил себя. Твои сообщения больше не удаляются.")
+        except Exception:
+            pass
+        await call.answer("Готово")
+    except Exception as e:
+        logging.error(f"biz_selfunmute error: {e}", exc_info=True)
         await call.answer("Ошибка.", show_alert=True)
-        return
-
-    conn = await get_business_conn(conn_id)
-    if not conn:
-        await call.answer("Соединение неактивно.", show_alert=True)
-        return
-
-    # нажать может только тот, кого замутили
-    if call.from_user.id != user_id:
-        await call.answer("Эта кнопка не для тебя.", show_alert=True)
-        return
-
-    conn["muted"].discard(user_id)
-    try:
-        await call.message.edit_text("🔊 Ты размутил себя. Твои сообщения больше не удаляются.")
-    except Exception:
-        pass
-    await call.answer("Готово")
 
 
 # ==================== КОМАНДЫ ====================
@@ -1770,6 +1803,10 @@ async def cmd_unmute(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
+    # Игнорируем business-сообщения (они обрабатываются отдельно)
+    if message.business_connection_id:
+        return
+
     if message.from_user:
         cache_user(message.chat.id, message.from_user)
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1876,7 +1913,7 @@ async def main():
     logging.info("Бот запущен, начинаю polling...")
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:
         logging.error(f"Polling упал: {e}", exc_info=True)
 
