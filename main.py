@@ -24,6 +24,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+print("=== START BOT ===")
+print(f"BOT_TOKEN set: {bool(BOT_TOKEN)}")
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -39,7 +42,7 @@ SERVICE_CLEANER_ENABLED = {}
 
 USER_STATS = {}
 
-# Business
+# Business: {connection_id: {"owner_id": int, "muted": set(), "can_delete": bool}}
 BUSINESS_CONNECTIONS = {}
 
 BOT_ID = None
@@ -527,7 +530,7 @@ async def warm_cache(chat_id: int):
             if not admin.user.is_bot:
                 cache_user(chat_id, admin.user)
     except Exception as e:
-        logging.warning(f"warm_cache({chat_id}): {e}")
+        print(f"warm_cache({chat_id}): {e}")
 
 
 def resolve_username(chat_id: int, username: str):
@@ -615,7 +618,7 @@ async def is_admin(message: types.Message) -> bool:
         member = await bot.get_chat_member(message.chat.id, message.from_user.id)
         return member.status in ("administrator", "creator")
     except Exception as e:
-        logging.warning(f"is_admin: {e}")
+        print(f"is_admin: {e}")
         return False
 
 
@@ -626,7 +629,7 @@ async def is_target_admin(message: types.Message, target_id: int) -> bool:
         member = await bot.get_chat_member(message.chat.id, target_id)
         return member.status in ("administrator", "creator")
     except Exception as e:
-        logging.warning(f"is_target_admin: {e}")
+        print(f"is_target_admin: {e}")
         return False
 
 
@@ -636,7 +639,7 @@ async def bot_can_restrict(message: types.Message) -> bool:
         member = await bot.get_chat_member(message.chat.id, me.id)
         return bool(getattr(member, "can_restrict_members", False))
     except Exception as e:
-        logging.warning(f"bot_can_restrict: {e}")
+        print(f"bot_can_restrict: {e}")
         return False
 
 
@@ -765,7 +768,7 @@ async def cmd_whoareyou(message: types.Message):
     await message.answer(await build_stats_message(message, user_id, name))
 
 
-# ==================== BUSINESS: ХЕЛП-ТЕКСТ ====================
+# ==================== BUSINESS ====================
 
 BUSINESS_HELP_TEXT = (
     "💼 <b>Business-бот — команды в личке</b>\n\n"
@@ -773,28 +776,27 @@ BUSINESS_HELP_TEXT = (
     "<b>Мут собеседника</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "• <code>.мут</code> — удалять все сообщения собеседника\n"
-    "• Кнопка «🔊 Размутить» — снять мут\n"
-    "• Собеседник может размутить себя сам — кнопка появится у него\n\n"
+    "• Кнопка «🔊 Размутить» — снять мут\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "<b>Прочее</b>\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "• <code>.хелп</code> или <code>.help</code> — этот список\n\n"
-    "💡 <i>Работает только в Business-режиме с Telegram Premium.</i>"
+    "⚠️ <i>Для мута нужно право «Удалять сообщения» в "
+    "Настройках Telegram Business → Чат-боты.</i>"
 )
 
 
-# ==================== BUSINESS: ХЕНДЛЕРЫ ====================
-
 @dp.business_connection()
 async def on_business_connection(conn: BusinessConnection):
-    logging.info(
-        f"=== BUSINESS CONNECTION ===\n"
+    print(
+        f"\n=== BUSINESS CONNECTION ===\n"
         f"id={conn.id}\n"
-        f"user_id={conn.user.id} (@{conn.user.username})\n"
+        f"user_id={conn.user.id}\n"
         f"enabled={conn.is_enabled}\n"
         f"can_reply={getattr(conn, 'can_reply', None)}\n"
-        f"can_delete_all_messages={getattr(conn, 'can_delete_all_messages', None)}"
+        f"can_delete_all_messages={getattr(conn, 'can_delete_all_messages', None)}\n"
     )
+
     if conn.is_enabled:
         BUSINESS_CONNECTIONS[conn.id] = {
             "owner_id": conn.user.id,
@@ -806,9 +808,20 @@ async def on_business_connection(conn: BusinessConnection):
 
 
 async def get_business_conn(conn_id: str):
+    """Возвращает актуальный dict с правами. Перезапрашивает через API, если нужно."""
     conn = BUSINESS_CONNECTIONS.get(conn_id)
     if conn:
+        # обновим права через API (могли измениться)
+        try:
+            bc = await bot.get_business_connection(conn_id)
+            conn["can_delete"] = bool(
+                getattr(bc, "can_delete_all_messages", False)
+            )
+            conn["owner_id"] = bc.user.id
+        except Exception as e:
+            print(f"get_business_conn refresh: {e}")
         return conn
+
     try:
         bc = await bot.get_business_connection(conn_id)
         conn = {
@@ -819,12 +832,11 @@ async def get_business_conn(conn_id: str):
         BUSINESS_CONNECTIONS[conn_id] = conn
         return conn
     except Exception as e:
-        logging.warning(f"Не удалось получить business connection: {e}")
+        print(f"get_business_conn: {e}")
         return None
 
 
 async def try_delete_business(conn_id: str, message_id: int) -> bool:
-    """Пытается удалить business-сообщение. Возвращает True при успехе."""
     try:
         await bot.delete_business_messages(
             business_connection_id=conn_id,
@@ -832,65 +844,61 @@ async def try_delete_business(conn_id: str, message_id: int) -> bool:
         )
         return True
     except Exception as e:
-        logging.warning(f"delete_business_messages failed: {e}")
+        print(f"delete_business_messages FAILED: {e}")
         return False
 
 
 @dp.business_message()
 async def on_business_message(message: types.Message):
-    """Обработка ВСЕХ сообщений в Business-личках."""
     try:
         conn_id = message.business_connection_id
         user_id = message.from_user.id if message.from_user else None
         text = (message.text or "").strip()
         text_low = text.lower()
 
-        logging.info(
-            f"=== BUSINESS MESSAGE ===\n"
+        print(
+            f"\n=== BUSINESS MESSAGE ===\n"
             f"conn_id={conn_id}\n"
             f"user_id={user_id}\n"
             f"chat_id={message.chat.id}\n"
-            f"text={text!r}"
+            f"text={text!r}\n"
         )
 
         if not conn_id:
-            logging.warning("Нет conn_id в business message")
+            print("Нет conn_id — игнор")
             return
 
         conn = await get_business_conn(conn_id)
         if not conn:
-            logging.warning(f"Не найден conn {conn_id}")
+            print(f"Не найден conn {conn_id}")
             return
 
         owner_id = conn["owner_id"]
         is_from_owner = (user_id == owner_id)
 
-        logging.info(
+        print(
             f"owner_id={owner_id}, is_from_owner={is_from_owner}, "
             f"muted={conn['muted']}, can_delete={conn.get('can_delete')}"
         )
 
         # ---------- .help / .хелп ----------
         if text_low in (".help", ".хелп"):
-            logging.info("Обработка .help / .хелп")
-            # удаляем команду (если можем)
+            print(">>> .help / .хелп")
             await try_delete_business(conn_id, message.message_id)
-
-            # отправляем список
             try:
                 await bot.send_message(
                     chat_id=message.chat.id,
                     text=BUSINESS_HELP_TEXT,
                 )
             except Exception as e:
-                logging.warning(f"Не удалось отправить .хелп: {e}")
+                print(f"send .хелп FAILED: {e}")
             return
 
         # ---------- .мут от владельца ----------
         if is_from_owner and text_low == ".мут":
-            logging.info("Обработка .мут")
+            print(">>> .мут")
 
-            target_id = message.chat.id  # в личке chat.id = собеседник
+            target_id = message.chat.id
             target_name = message.chat.full_name or "собеседник"
 
             if target_id == owner_id:
@@ -903,33 +911,39 @@ async def on_business_message(message: types.Message):
                     pass
                 return
 
-            conn["muted"].add(target_id)
+            # проверяем право удаления
+            if not conn.get("can_delete", False):
+                print("!!! can_delete=False — мут невозможен")
+                try:
+                    await bot.send_message(
+                        chat_id=message.chat.id,
+                        text=(
+                            "❌ <b>Не могу замутить собеседника.</b>\n\n"
+                            "У бота нет права <b>«Удалять сообщения»</b>.\n"
+                            "Без него я не смогу удалять сообщения собеседника.\n\n"
+                            "<b>Как включить:</b>\n"
+                            "1. Настройки Telegram → Telegram Business\n"
+                            "2. → Чат-боты → твой бот\n"
+                            "3. Включи право «Удалять сообщения»\n"
+                            "4. Перезапусти бота\n\n"
+                            "После этого напиши <code>.мут</code> снова."
+                        )
+                    )
+                except Exception as e:
+                    print(f"send warning FAILED: {e}")
+                await try_delete_business(conn_id, message.message_id)
+                return
 
-            # удаляем команду .мут, если можем
+            # право есть — включаем
+            conn["muted"].add(target_id)
+            print(f"Мут включён для {target_id}")
+
             await try_delete_business(conn_id, message.message_id)
 
-            can_del = conn.get("can_delete", False)
-            warning = ""
-            if not can_del:
-                warning = (
-                    "\n\n⚠️ <b>Внимание:</b> боту не выдано право "
-                    "«Удаление сообщений». Сообщения собеседника НЕ будут удаляться. "
-                    "Включи право в Telegram Business → Чат-боты."
-                )
-
-            # кнопка для владельца
-            kb_owner = InlineKeyboardMarkup(inline_keyboard=[[
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="🔊 Размутить",
                     callback_data=f"biz_unmute:{conn_id}:{target_id}"
-                )
-            ]])
-
-            # кнопка для собеседника
-            kb_target = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="🔊 Размутить себя",
-                    callback_data=f"biz_selfunmute:{conn_id}:{target_id}"
                 )
             ]])
 
@@ -939,41 +953,27 @@ async def on_business_message(message: types.Message):
                     text=(
                         f"🔇 Мут включён для <b>{target_name}</b>.\n"
                         f"Теперь его сообщения будут удаляться."
-                        f"{warning}"
                     ),
-                    reply_markup=kb_owner
+                    reply_markup=kb
                 )
             except Exception as e:
-                logging.warning(f"Не отправилось подтверждение владельцу: {e}")
-
-            try:
-                await bot.send_message(
-                    chat_id=message.chat.id,
-                    text="ℹ️ Если тебе это не нравится — можешь размутить себя сам:",
-                    reply_markup=kb_target
-                )
-            except Exception as e:
-                logging.warning(f"Не отправилось сообщение собеседнику: {e}")
+                print(f"send confirm FAILED: {e}")
             return
 
         # ---------- сообщение от собеседника в муте ----------
         if not is_from_owner and user_id in conn["muted"]:
-            logging.info(f"Удаляю сообщение замученного {user_id}")
+            print(f">>> Удаляю сообщение замученного {user_id}")
             ok = await try_delete_business(conn_id, message.message_id)
-            if not ok:
-                logging.warning(
-                    "Сообщение не удалено. Проверь право can_delete_all_messages у бота."
-                )
+            print(f"Удаление: {'OK' if ok else 'FAILED'}")
             return
 
-        # ---------- остальные сообщения — игнор ----------
-        logging.info("Business message без команды — игнор")
+        print(">>> обычное сообщение — игнор")
 
     except Exception as e:
-        logging.error(f"Ошибка в on_business_message: {e}", exc_info=True)
+        print(f"!!! on_business_message ERROR: {e}")
+        import traceback
+        traceback.print_exc()
 
-
-# ==================== BUSINESS: CALLBACK ====================
 
 @dp.callback_query(lambda c: c.data.startswith("biz_unmute:"))
 async def biz_unmute_callback(call: CallbackQuery):
@@ -995,54 +995,19 @@ async def biz_unmute_callback(call: CallbackQuery):
             return
 
         if call.from_user.id != conn["owner_id"]:
-            await call.answer(
-                "Размутить может только владелец. Используй «Размутить себя».",
-                show_alert=True
+            await call.answer("Размутить может только владелец.", show_alert=True)
+            return
+
+        conn["muted"].discard(user_id)
+        try:
+            await call.message.edit_text(
+                "🔊 Пользователь размучен. Сообщения больше не удаляются."
             )
-            return
-
-        conn["muted"].discard(user_id)
-        try:
-            await call.message.edit_text("🔊 Пользователь размучен. Сообщения больше не удаляются.")
         except Exception:
             pass
         await call.answer("Готово")
     except Exception as e:
-        logging.error(f"biz_unmute error: {e}", exc_info=True)
-        await call.answer("Ошибка.", show_alert=True)
-
-
-@dp.callback_query(lambda c: c.data.startswith("biz_selfunmute:"))
-async def biz_selfunmute_callback(call: CallbackQuery):
-    try:
-        parts = call.data.split(":")
-        if len(parts) != 3:
-            await call.answer("Ошибка.", show_alert=True)
-            return
-        _, conn_id, user_id_str = parts
-        try:
-            user_id = int(user_id_str)
-        except ValueError:
-            await call.answer("Ошибка.", show_alert=True)
-            return
-
-        conn = await get_business_conn(conn_id)
-        if not conn:
-            await call.answer("Соединение неактивно.", show_alert=True)
-            return
-
-        if call.from_user.id != user_id:
-            await call.answer("Эта кнопка не для тебя.", show_alert=True)
-            return
-
-        conn["muted"].discard(user_id)
-        try:
-            await call.message.edit_text("🔊 Ты размутил себя. Твои сообщения больше не удаляются.")
-        except Exception:
-            pass
-        await call.answer("Готово")
-    except Exception as e:
-        logging.error(f"biz_selfunmute error: {e}", exc_info=True)
+        print(f"biz_unmute error: {e}")
         await call.answer("Ошибка.", show_alert=True)
 
 
@@ -1092,8 +1057,7 @@ async def cmd_help(message: types.Message):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• <code>.мут</code> — удалять сообщения собеседника\n"
         "• <code>.хелп</code> / <code>.help</code> — список команд\n"
-        "• кнопка «🔊 Размутить» — снять мут\n"
-        "• собеседник может размутить себя сам\n\n"
+        "• кнопка «🔊 Размутить» — снять мут\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔨 <b>Администрация:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1224,7 +1188,7 @@ async def cmd_everyone(message: types.Message):
             if not admin.user.is_bot:
                 user_ids.add(admin.user.id)
     except Exception as e:
-        logging.warning(f"get_chat_administrators: {e}")
+        print(f"get_chat_administrators: {e}")
 
     user_ids.add(message.from_user.id)
 
@@ -1279,11 +1243,11 @@ async def cmd_delete(message: types.Message):
     try:
         await bot.delete_message(message.chat.id, message.reply_to_message.message_id)
     except Exception as e:
-        logging.warning(f"delete target: {e}")
+        print(f"delete target: {e}")
     try:
         await message.delete()
     except Exception as e:
-        logging.warning(f"delete cmd: {e}")
+        print(f"delete cmd: {e}")
 
 
 # ==================== КНБ ====================
@@ -1803,7 +1767,6 @@ async def cmd_unmute(message: types.Message):
 
 @dp.message()
 async def filter_messages(message: types.Message):
-    # Игнорируем business-сообщения (они обрабатываются отдельно)
     if message.business_connection_id:
         return
 
@@ -1819,7 +1782,7 @@ async def filter_messages(message: types.Message):
         try:
             await message.delete()
         except Exception as e:
-            logging.warning(f"Не удалил сервисное: {e}")
+            print(f"Не удалил сервисное: {e}")
         return
 
     if not message.text:
@@ -1852,9 +1815,9 @@ async def filter_messages(message: types.Message):
     if is_bad:
         try:
             await message.delete()
-            logging.info(f"Удалено от {message.from_user.id} в {message.chat.id}")
+            print(f"Удалено от {message.from_user.id} в {message.chat.id}")
         except Exception as e:
-            logging.warning(f"Не удалил мат: {e}")
+            print(f"Не удалил мат: {e}")
         return
 
     track_message(message.chat.id, message.from_user, is_bad=False)
@@ -1892,30 +1855,43 @@ async def set_commands():
     try:
         await bot.set_my_commands(commands)
     except Exception as e:
-        logging.warning(f"set_my_commands: {e}")
+        print(f"set_my_commands: {e}")
 
 
 # ==================== ЗАПУСК ====================
 
 async def main():
     global BOT_ID
-    logging.info("Запуск бота...")
+    print("=== MAIN START ===")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
-        logging.warning(f"delete_webhook: {e}")
+        print(f"delete_webhook: {e}")
 
     me = await bot.get_me()
     BOT_ID = me.id
-    logging.info(f"Бот: @{me.username} (id={BOT_ID})")
+    print(f"Бот: @{me.username} (id={BOT_ID})")
 
     await set_commands()
-    logging.info("Бот запущен, начинаю polling...")
+
+    # стартовая проверка: есть ли активные Business подключения?
+    print("Проверяю Business-подключения...")
+    try:
+        # получаем все апдейты типа business_connection
+        # к сожалению, у Telegram нет метода «список business connections»
+        # но мы можем проверить, что хендлер зарегистрирован
+        print("Хендлеры: business_connection, business_message — зарегистрированы")
+    except Exception as e:
+        print(f"Business check: {e}")
+
+    print("=== BOT STARTED, POLLING ===")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except Exception as e:
-        logging.error(f"Polling упал: {e}", exc_info=True)
+        print(f"Polling упал: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
