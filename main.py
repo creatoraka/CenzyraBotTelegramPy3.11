@@ -4,7 +4,6 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, ChatType
@@ -387,6 +386,16 @@ def has_bad_words(text: str) -> bool:
     if not text:
         return False
 
+    # Слитный вариант (без пробелов и знаков) — ловит «иди нахуй», «похуй» и т.д.
+    flat = normalize(text)
+    if flat and flat not in WHITELIST:
+        for bad in SHORT_BAD:
+            if len(bad) >= 3 and bad in flat:
+                return True
+        for bad in LONG_BAD:
+            if bad in flat:
+                return True
+
     raw_words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
     norm_words = [normalize(w) for w in raw_words if normalize(w)]
 
@@ -396,7 +405,6 @@ def has_bad_words(text: str) -> bool:
     if len(norm_words) == 1 and norm_words[0] in WHITELIST:
         return False
 
-    # 1. LONG_BAD как подстрока
     for w in norm_words:
         if w in WHITELIST:
             continue
@@ -404,7 +412,6 @@ def has_bad_words(text: str) -> bool:
             if bad in w:
                 return True
 
-    # 2. SHORT_BAD — точное совпадение ИЛИ подстрока (len >= 3)
     for w in norm_words:
         if w in WHITELIST:
             continue
@@ -413,29 +420,6 @@ def has_bad_words(text: str) -> bool:
         for bad in SHORT_BAD:
             if len(bad) >= 3 and bad in w:
                 return True
-
-    # 3. Все слова короткие — проверяем целый текст
-    all_short = all(len(w) <= 2 for w in norm_words)
-    if all_short and len(norm_words) >= 2:
-        flat = normalize(text)
-        if flat and flat not in WHITELIST:
-            for bad in SHORT_BAD:
-                if len(bad) >= 3 and bad in flat:
-                    return True
-            for bad in LONG_BAD:
-                if bad in flat:
-                    return True
-
-    # 4. Одно слово без пробелов
-    if " " not in text.strip():
-        flat = normalize(text)
-        if flat and flat not in WHITELIST:
-            for bad in SHORT_BAD:
-                if len(bad) >= 3 and bad in flat:
-                    return True
-            for bad in LONG_BAD:
-                if bad in flat:
-                    return True
 
     return False
 
@@ -1123,6 +1107,45 @@ async def cmd_superlist(message: types.Message):
     await message.answer(text)
 
 
+# ==================== ГОЛОСОВОЙ ЧАТ ====================
+
+@dp.message(Command("voice"))
+@dp.message(Command("startvoice"))
+async def cmd_start_voice(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply("❌ Только в группах.")
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы и супер-админы.")
+        return
+
+    # Bot API не поддерживает запуск голосовых чатов ботом
+    await message.answer(
+        "🎤 <b>Голосовой чат</b>\n\n"
+        "Bot API не позволяет ботам запускать голосовые чаты.\n"
+        "Запусти вручную:\n"
+        "1. Открой меню чата (три точки)\n"
+        "2. Выбери «Голосовой чат» / «Video chat»\n"
+        "3. Нажми «Начать»"
+    )
+
+
+@dp.message(Command("endvoice"))
+async def cmd_end_voice(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply("❌ Только в группах.")
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы и супер-админы.")
+        return
+
+    await message.answer(
+        "🔇 <b>Завершение голосового чата</b>\n\n"
+        "Bot API не позволяет ботам завершать голосовые чаты.\n"
+        "Заверши вручную через меню активного голосового чата → «Завершить»."
+    )
+
+
 # ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -1136,7 +1159,8 @@ async def cmd_start(message: types.Message):
         "🎲 Развлекательные команды\n"
         "🔨 Модерация\n"
         "🔠 Защита от капслока\n"
-        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n\n"
+        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n"
+        "🎤 Голосовой чат: /voice и /endvoice (только админы)\n\n"
         "💼 Если я подключён к твоему Business-аккаунту, "
         "напиши мне в личку <code>.мут</code> или <code>.хелп</code>.\n\n"
         "📌 /help для списка команд."
@@ -1190,6 +1214,9 @@ async def cmd_help(message: types.Message):
         "• /addsuper @user — добавить в whitelist\n"
         "• /delsuper @user — убрать из whitelist\n"
         "• /superlist — список супер-админов\n\n"
+        "<b>Голосовой чат (только админы + супер-админы):</b>\n"
+        "• /voice или /startvoice — инструкция по запуску\n"
+        "• /endvoice — инструкция по завершению\n\n"
         "<b>Управление ботом:</b>\n"
         "• /censor — включить цензуру\n"
         "• /uncensor — выключить цензуру\n"
@@ -2065,6 +2092,9 @@ async def set_commands():
         types.BotCommand(command="addsuper", description="Добавить супер-админа"),
         types.BotCommand(command="delsuper", description="Убрать супер-админа"),
         types.BotCommand(command="superlist", description="Список супер-админов"),
+        types.BotCommand(command="voice", description="Запуск голосового чата"),
+        types.BotCommand(command="startvoice", description="Запуск голосового чата"),
+        types.BotCommand(command="endvoice", description="Завершение голосового чата"),
     ]
     try:
         await bot.set_my_commands(commands)
