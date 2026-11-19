@@ -4,6 +4,7 @@ import random
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, ChatType
@@ -25,26 +26,31 @@ logging.basicConfig(
 )
 
 print("=== START BOT ===")
-print(f"BOT_TOKEN set: {bool(BOT_TOKEN)}")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# ==================== СУПЕР-АДМИНЫ ====================
+
+SUPER_ADMINS = {"creatoraka"}
+SUPER_ADMIN_IDS = set()
+
+# ==================== ХРАНИЛИЩА ====================
 
 TEMP_BANS = {}
 TEMP_MUTES = {}
 RPS_GAMES = {}
 RPS_INVITES = {}
 CENSOR_ENABLED = {}
+CAPS_ENABLED = {}
+LINKS_ENABLED = {}
 USERNAME_CACHE = {}
 USER_ID_TO_NAME = {}
 WARMED_CHATS = set()
 SERVICE_CLEANER_ENABLED = {}
 
 USER_STATS = {}
-
-# Business: {connection_id: {"owner_id": int, "muted": set(), "can_delete": bool}}
 BUSINESS_CONNECTIONS = {}
-
 BOT_ID = None
 
 # ==================== НОРМАЛИЗАЦИЯ ====================
@@ -250,6 +256,8 @@ SHORT_BAD = [
     "хуйло", "хуйня", "хуец", "хуищ", "хуяч", "хуяр",
     "хуел", "хуею", "хуев",
     "схуя", "схуй",
+    "нахуй", "похуй", "нахуя", "похуя", "нахуе", "похуе",
+    "нахую", "похую", "нахуи", "похуи",
     "хер",
     "пизд", "пизж",
     "блядь", "бляди", "блядо", "бляде", "бляду",
@@ -388,6 +396,7 @@ def has_bad_words(text: str) -> bool:
     if len(norm_words) == 1 and norm_words[0] in WHITELIST:
         return False
 
+    # 1. LONG_BAD как подстрока
     for w in norm_words:
         if w in WHITELIST:
             continue
@@ -395,12 +404,17 @@ def has_bad_words(text: str) -> bool:
             if bad in w:
                 return True
 
+    # 2. SHORT_BAD — точное совпадение ИЛИ подстрока (len >= 3)
     for w in norm_words:
         if w in WHITELIST:
             continue
         if w in SHORT_BAD:
             return True
+        for bad in SHORT_BAD:
+            if len(bad) >= 3 and bad in w:
+                return True
 
+    # 3. Все слова короткие — проверяем целый текст
     all_short = all(len(w) <= 2 for w in norm_words)
     if all_short and len(norm_words) >= 2:
         flat = normalize(text)
@@ -412,6 +426,7 @@ def has_bad_words(text: str) -> bool:
                 if bad in flat:
                     return True
 
+    # 4. Одно слово без пробелов
     if " " not in text.strip():
         flat = normalize(text)
         if flat and flat not in WHITELIST:
@@ -422,6 +437,53 @@ def has_bad_words(text: str) -> bool:
                 if bad in flat:
                     return True
 
+    return False
+
+
+# ==================== КАПСЛОК ====================
+
+def is_caps_lock(text: str, min_len: int = 6, threshold: float = 0.7) -> bool:
+    if not text:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < min_len:
+        return False
+    upper = sum(1 for c in letters if c.isupper())
+    return (upper / len(letters)) >= threshold
+
+
+# ==================== ССЫЛКИ ====================
+
+URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"']+",
+    re.IGNORECASE
+)
+
+ALLOWED_LINK_PREFIXES = (
+    "https://www.youtube.com/shorts",
+    "http://www.youtube.com/shorts",
+    "https://youtube.com/shorts",
+    "http://youtube.com/shorts",
+    "www.youtube.com/shorts",
+    "youtube.com/shorts",
+)
+
+
+def is_allowed_link(url: str) -> bool:
+    url_low = url.lower().rstrip("/")
+    for prefix in ALLOWED_LINK_PREFIXES:
+        if url_low.startswith(prefix):
+            return True
+    return False
+
+
+def has_forbidden_links(text: str) -> bool:
+    if not text:
+        return False
+    found = URL_RE.findall(text)
+    for url in found:
+        if not is_allowed_link(url):
+            return True
     return False
 
 
@@ -609,10 +671,25 @@ async def resolve_target(message: types.Message):
     )
 
 
-# ==================== УТИЛИТЫ ====================
+# ==================== ПРОВЕРКА ПРАВ ====================
+
+def is_super_admin(message: types.Message) -> bool:
+    if not message.from_user:
+        return False
+    uname = (message.from_user.username or "").lower()
+    uid = message.from_user.id
+
+    if uname and uname in SUPER_ADMINS:
+        return True
+    if uid in SUPER_ADMIN_IDS:
+        return True
+    return False
+
 
 async def is_admin(message: types.Message) -> bool:
     if message.chat.type == ChatType.PRIVATE:
+        return True
+    if is_super_admin(message):
         return True
     try:
         member = await bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -656,6 +733,19 @@ async def check_target(message: types.Message, user_id: int, name: str) -> bool:
     if user_id == BOT_ID:
         await message.reply("🤖 Нельзя наказывать самого бота.")
         return False
+
+    for uname, cached_id in USERNAME_CACHE.get(message.chat.id, {}).items():
+        if cached_id == user_id and uname in SUPER_ADMINS:
+            await message.reply(
+                f"🛡 <b>{name}</b> — супер-админ. Его нельзя наказать."
+            )
+            return False
+    if user_id in SUPER_ADMIN_IDS:
+        await message.reply(
+            f"🛡 <b>{name}</b> — супер-админ. Его нельзя наказать."
+        )
+        return False
+
     if await is_target_admin(message, user_id):
         await message.reply(f"🛡 <b>{name}</b> — админ. Его нельзя наказать.")
         return False
@@ -808,10 +898,8 @@ async def on_business_connection(conn: BusinessConnection):
 
 
 async def get_business_conn(conn_id: str):
-    """Возвращает актуальный dict с правами. Перезапрашивает через API, если нужно."""
     conn = BUSINESS_CONNECTIONS.get(conn_id)
     if conn:
-        # обновим права через API (могли измениться)
         try:
             bc = await bot.get_business_connection(conn_id)
             conn["can_delete"] = bool(
@@ -865,25 +953,16 @@ async def on_business_message(message: types.Message):
         )
 
         if not conn_id:
-            print("Нет conn_id — игнор")
             return
 
         conn = await get_business_conn(conn_id)
         if not conn:
-            print(f"Не найден conn {conn_id}")
             return
 
         owner_id = conn["owner_id"]
         is_from_owner = (user_id == owner_id)
 
-        print(
-            f"owner_id={owner_id}, is_from_owner={is_from_owner}, "
-            f"muted={conn['muted']}, can_delete={conn.get('can_delete')}"
-        )
-
-        # ---------- .help / .хелп ----------
         if text_low in (".help", ".хелп"):
-            print(">>> .help / .хелп")
             await try_delete_business(conn_id, message.message_id)
             try:
                 await bot.send_message(
@@ -894,10 +973,7 @@ async def on_business_message(message: types.Message):
                 print(f"send .хелп FAILED: {e}")
             return
 
-        # ---------- .мут от владельца ----------
         if is_from_owner and text_low == ".мут":
-            print(">>> .мут")
-
             target_id = message.chat.id
             target_name = message.chat.full_name or "собеседник"
 
@@ -911,9 +987,7 @@ async def on_business_message(message: types.Message):
                     pass
                 return
 
-            # проверяем право удаления
             if not conn.get("can_delete", False):
-                print("!!! can_delete=False — мут невозможен")
                 try:
                     await bot.send_message(
                         chat_id=message.chat.id,
@@ -934,9 +1008,7 @@ async def on_business_message(message: types.Message):
                 await try_delete_business(conn_id, message.message_id)
                 return
 
-            # право есть — включаем
             conn["muted"].add(target_id)
-            print(f"Мут включён для {target_id}")
 
             await try_delete_business(conn_id, message.message_id)
 
@@ -960,14 +1032,10 @@ async def on_business_message(message: types.Message):
                 print(f"send confirm FAILED: {e}")
             return
 
-        # ---------- сообщение от собеседника в муте ----------
         if not is_from_owner and user_id in conn["muted"]:
-            print(f">>> Удаляю сообщение замученного {user_id}")
             ok = await try_delete_business(conn_id, message.message_id)
             print(f"Удаление: {'OK' if ok else 'FAILED'}")
             return
-
-        print(">>> обычное сообщение — игнор")
 
     except Exception as e:
         print(f"!!! on_business_message ERROR: {e}")
@@ -1011,6 +1079,50 @@ async def biz_unmute_callback(call: CallbackQuery):
         await call.answer("Ошибка.", show_alert=True)
 
 
+# ==================== УПРАВЛЕНИЕ СУПЕР-АДМИНАМИ ====================
+
+@dp.message(Command("addsuper"))
+async def cmd_addsuper(message: types.Message):
+    if not is_super_admin(message):
+        await message.reply("❌ Только супер-админы могут менять whitelist.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("❌ Формат: <code>/addsuper @username</code>")
+        return
+    uname = parts[1].lstrip("@").lower()
+    SUPER_ADMINS.add(uname)
+    await message.reply(f"✅ <code>@{uname}</code> добавлен в супер-админы.")
+
+
+@dp.message(Command("delsuper"))
+async def cmd_delsuper(message: types.Message):
+    if not is_super_admin(message):
+        await message.reply("❌ Только супер-админы могут менять whitelist.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.reply("❌ Формат: <code>/delsuper @username</code>")
+        return
+    uname = parts[1].lstrip("@").lower()
+    SUPER_ADMINS.discard(uname)
+    await message.reply(f"✅ <code>@{uname}</code> удалён из супер-админов.")
+
+
+@dp.message(Command("superlist"))
+async def cmd_superlist(message: types.Message):
+    if not is_super_admin(message):
+        await message.reply("❌ Только для супер-админов.")
+        return
+    if not SUPER_ADMINS:
+        await message.answer("📋 Список пуст.")
+        return
+    text = "📋 <b>Супер-админы:</b>\n" + "\n".join(
+        f"• @{u}" for u in sorted(SUPER_ADMINS)
+    )
+    await message.answer(text)
+
+
 # ==================== КОМАНДЫ ====================
 
 @dp.message(Command("start"))
@@ -1022,7 +1134,9 @@ async def cmd_start(message: types.Message):
         "🧹 Чищу сервисные сообщения\n"
         "📢 Созываю всех через /everyone\n"
         "🎲 Развлекательные команды\n"
-        "🔨 Модерация\n\n"
+        "🔨 Модерация\n"
+        "🔠 Защита от капслока\n"
+        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n\n"
         "💼 Если я подключён к твоему Business-аккаунту, "
         "напиши мне в личку <code>.мут</code> или <code>.хелп</code>.\n\n"
         "📌 /help для списка команд."
@@ -1072,14 +1186,26 @@ async def cmd_help(message: types.Message):
         "• /vmute &lt;мин&gt; — мут голосовых\n"
         "• /unmute — снять все муты\n"
         "• /users — кого бот знает (для @username)\n\n"
+        "<b>Супер-админы:</b>\n"
+        "• /addsuper @user — добавить в whitelist\n"
+        "• /delsuper @user — убрать из whitelist\n"
+        "• /superlist — список супер-админов\n\n"
         "<b>Управление ботом:</b>\n"
         "• /censor — включить цензуру\n"
         "• /uncensor — выключить цензуру\n"
         "• /censor_status — статус цензуры\n"
+        "• /caps — включить защиту от капслока\n"
+        "• /uncaps — выключить защиту от капслока\n"
+        "• /caps_status — статус защиты от капслока\n"
+        "• /links — включить защиту от ссылок\n"
+        "• /unlinks — выключить защиту от ссылок\n"
+        "• /links_status — статус защиты от ссылок\n"
         "• /service_on — вкл. чистку сервисных\n"
         "• /service_off — выкл. чистку\n"
         "• /service_status — статус чистки\n\n"
-        "💡 <i>Все команды администрации работают только для админов чата.</i>"
+        "💡 <i>Команды администрации доступны админам чата. "
+        "Отдельные пользователи из whitelist могут использовать их без прав.</i>\n\n"
+        "🔗 <i>Защита от ссылок не блокирует https://www.youtube.com/shorts</i>"
     )
 
 
@@ -1111,6 +1237,66 @@ async def cmd_censor_status(message: types.Message):
         return
     status = CENSOR_ENABLED.get(message.chat.id, True)
     await message.answer(f"Цензура: {'✅ вкл' if status else '🔓 выкл'}")
+
+
+@dp.message(Command("caps"))
+async def cmd_caps_on(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    CAPS_ENABLED[message.chat.id] = True
+    await message.answer("✅ Защита от капслока включена.")
+
+
+@dp.message(Command("uncaps"))
+async def cmd_caps_off(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    CAPS_ENABLED[message.chat.id] = False
+    await message.answer("🔓 Защита от капслока выключена.")
+
+
+@dp.message(Command("caps_status"))
+async def cmd_caps_status(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    status = CAPS_ENABLED.get(message.chat.id, False)
+    await message.answer(f"Защита от капслока: {'✅ вкл' if status else '🔓 выкл'}")
+
+
+@dp.message(Command("links"))
+async def cmd_links_on(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    LINKS_ENABLED[message.chat.id] = True
+    await message.answer("✅ Защита от ссылок включена (кроме youtube.com/shorts).")
+
+
+@dp.message(Command("unlinks"))
+async def cmd_links_off(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    if not await is_admin(message):
+        await message.reply("❌ Только админы.")
+        return
+    LINKS_ENABLED[message.chat.id] = False
+    await message.answer("🔓 Защита от ссылок выключена.")
+
+
+@dp.message(Command("links_status"))
+async def cmd_links_status(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    status = LINKS_ENABLED.get(message.chat.id, False)
+    await message.answer(f"Защита от ссылок: {'✅ вкл' if status else '🔓 выкл'}")
 
 
 @dp.message(Command("service_on"))
@@ -1806,6 +1992,25 @@ async def filter_messages(message: types.Message):
             pass
         return
 
+    # --- Защита от капслока ---
+    if CAPS_ENABLED.get(message.chat.id, False) and is_caps_lock(message.text):
+        try:
+            await message.delete()
+            print(f"Удалён капслок от {message.from_user.id} в {message.chat.id}")
+        except Exception as e:
+            print(f"Не удалил капслок: {e}")
+        return
+
+    # --- Защита от ссылок ---
+    if LINKS_ENABLED.get(message.chat.id, False) and has_forbidden_links(message.text):
+        try:
+            await message.delete()
+            print(f"Удалена ссылка от {message.from_user.id} в {message.chat.id}")
+        except Exception as e:
+            print(f"Не удалил ссылку: {e}")
+        return
+
+    # --- Цензура мата ---
     if not CENSOR_ENABLED.get(message.chat.id, True):
         track_message(message.chat.id, message.from_user, is_bad=False)
         return
@@ -1840,6 +2045,12 @@ async def set_commands():
         types.BotCommand(command="censor", description="Вкл. цензуру"),
         types.BotCommand(command="uncensor", description="Выкл. цензуру"),
         types.BotCommand(command="censor_status", description="Статус цензуры"),
+        types.BotCommand(command="caps", description="Вкл. защиту от капслока"),
+        types.BotCommand(command="uncaps", description="Выкл. защиту от капслока"),
+        types.BotCommand(command="caps_status", description="Статус защиты от капслока"),
+        types.BotCommand(command="links", description="Вкл. защиту от ссылок"),
+        types.BotCommand(command="unlinks", description="Выкл. защиту от ссылок"),
+        types.BotCommand(command="links_status", description="Статус защиты от ссылок"),
         types.BotCommand(command="service_on", description="Вкл. чистку"),
         types.BotCommand(command="service_off", description="Выкл. чистку"),
         types.BotCommand(command="service_status", description="Статус чистки"),
@@ -1851,6 +2062,9 @@ async def set_commands():
         types.BotCommand(command="mute", description="Мут"),
         types.BotCommand(command="vmute", description="Мут голосовых"),
         types.BotCommand(command="unmute", description="Размут"),
+        types.BotCommand(command="addsuper", description="Добавить супер-админа"),
+        types.BotCommand(command="delsuper", description="Убрать супер-админа"),
+        types.BotCommand(command="superlist", description="Список супер-админов"),
     ]
     try:
         await bot.set_my_commands(commands)
@@ -1871,19 +2085,10 @@ async def main():
     me = await bot.get_me()
     BOT_ID = me.id
     print(f"Бот: @{me.username} (id={BOT_ID})")
+    print(f"Супер-админы (username): {SUPER_ADMINS}")
+    print(f"Супер-админы (id): {SUPER_ADMIN_IDS}")
 
     await set_commands()
-
-    # стартовая проверка: есть ли активные Business подключения?
-    print("Проверяю Business-подключения...")
-    try:
-        # получаем все апдейты типа business_connection
-        # к сожалению, у Telegram нет метода «список business connections»
-        # но мы можем проверить, что хендлер зарегистрирован
-        print("Хендлеры: business_connection, business_message — зарегистрированы")
-    except Exception as e:
-        print(f"Business check: {e}")
-
     print("=== BOT STARTED, POLLING ===")
 
     try:
