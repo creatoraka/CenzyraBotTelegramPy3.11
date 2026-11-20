@@ -2534,74 +2534,219 @@ async def cmd_unmute(message: types.Message):
 def multi_duel_keyboard(game_id, game):
     rows = []
     if game["phase"] == "lobby":
-        rows.append([InlineKeyboardButton(text=f"➕ Участвовать ({len(game['players'])}/{game['limit']+1})", callback_data=f"mdjoin:{game_id}")])
+        rows.append([InlineKeyboardButton(
+            text=f"➕ Участвовать ({len(game['players'])}/{game['limit']+1})",
+            callback_data=f"mdjoin:{game_id}"
+        )])
     else:
-        rows.append([InlineKeyboardButton(text="🔫 Выбрать цель", callback_data=f"mdtargets:{game_id}")])
+        rows.extend([
+            [InlineKeyboardButton(text="🎯 Прицелиться", callback_data=f"mdact:{game_id}:aim")],
+            [InlineKeyboardButton(text="🔫 Выстрелить", callback_data=f"mdact:{game_id}:shoot")],
+            [InlineKeyboardButton(text="🛡 Уклониться", callback_data=f"mdact:{game_id}:dodge")],
+        ])
     rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"mdcancel:{game_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def multi_duel_text(game, note=""):
+    alive = [game["players"][x] for x in game["alive"]]
+    text = "⚔️ <b>Коллективная дуэль</b>\n"
+    if note:
+        text += f"\n{note}\n"
+    text += "\nУчастники:\n" + "\n".join(
+        f"{'🟢' if uid in game['alive'] else '💀'} {name}"
+        for uid, name in game["players"].items()
+    )
+    if game["phase"] == "lobby":
+        text += f"\n\nНабор: {len(game['players'])}/{game['limit']+1}"
+        text += "\nПрисоединиться могут только приглашённые игроки."
+    elif game["phase"] == "active":
+        text += f"\n\n🎮 Ход: <b>{game['players'][game['current_uid']]}</b>"
+        text += "\nВыбери действие: прицелиться, выстрелить или уклониться."
+    return text
+
+
 @dp.message(Command("multi-duel"))
 async def cmd_multi_duel(message: types.Message):
-    if message.chat.type == ChatType.PRIVATE or not message.from_user: return
+    if message.chat.type == ChatType.PRIVATE or not message.from_user:
+        return
     args = (message.text or "").split()
-    try: extra = int(args[1])
+    try:
+        extra = int(args[1])
     except (IndexError, ValueError):
-        await message.reply("Использование: /multi-duel 2 (пригласить ещё двух игроков)"); return
-    if not 1 <= extra <= 9:
-        await message.reply("Можно пригласить от 1 до 9 дополнительных игроков."); return
-    gid = make_game_id(message.chat.id, message.from_user.id)
-    game = {"chat_id": message.chat.id, "creator": message.from_user.id, "limit": extra,
-            "players": {message.from_user.id: message.from_user.full_name}, "alive": [],
-            "order": [message.from_user.id], "phase": "lobby", "current_uid": None}
-    MULTI_DUELS[gid] = game
-    await message.answer(f"⚔️ <b>Коллективная дуэль</b>\nСоздатель: {message.from_user.mention_html()}\nНужно участников: {extra+1}.\nНажмите, чтобы присоединиться.", reply_markup=multi_duel_keyboard(gid, game))
+        await message.reply("Использование: /multi-duel 2 — создатель и ещё 2 приглашённых игрока.")
+        return
+    if not 2 <= extra <= 9:
+        await message.reply("Укажите от 2 до 9 приглашённых игроков.")
+        return
 
-@dp.callback_query(lambda c: (c.data or "").startswith(("mdjoin:", "mdtargets:", "mdtarget:", "mdcancel:")))
+    # Приглашённые задаются через Telegram text_mention (выбор пользователя из подсказки)
+    # либо числовыми Telegram ID. Неизвестные участники не смогут войти.
+    invited = set()
+    for ent in (message.entities or []):
+        if ent.type == "text_mention" and ent.user:
+            invited.add(ent.user.id)
+    for token in args[2:]:
+        if token.isdigit():
+            invited.add(int(token))
+    if len(invited) != extra:
+        await message.reply(
+            f"Нужно указать ровно {extra} приглашённых: /multi-duel {extra} и отметить "
+            "нужных людей через упоминание с выбором пользователя (text mention) "
+            "или добавить их Telegram ID."
+        )
+        return
+    if message.from_user.id in invited:
+        await message.reply("Нельзя приглашать самого себя.")
+        return
+
+    gid = make_game_id(message.chat.id, message.from_user.id)
+    players = {message.from_user.id: message.from_user.full_name}
+    game = {
+        "chat_id": message.chat.id, "creator": message.from_user.id,
+        "limit": extra, "players": players, "invited": invited,
+        "alive": [], "order": [message.from_user.id], "phase": "lobby",
+        "current_uid": None, "aimed": {}, "dodging": set(),
+        "pending_action": {}
+    }
+    MULTI_DUELS[gid] = game
+    await message.answer(
+        multi_duel_text(game) + "\n\nПриглашены: " +
+        ", ".join(f"<a href='tg://user?id={uid}'>игрок</a>" for uid in invited),
+        reply_markup=multi_duel_keyboard(gid, game)
+    )
+
+
+@dp.callback_query(lambda c: (c.data or "").startswith(("mdjoin:", "mdact:", "mdtarget:", "mdcancel:", "mdback:")))
 async def multi_duel_callback(call: CallbackQuery):
-    parts = call.data.split(":"); action, gid = parts[0], parts[1]
+    parts = call.data.split(":")
+    action, gid = parts[0], parts[1]
     game = MULTI_DUELS.get(gid)
-    if not game: await call.answer("Игра уже завершена.", show_alert=True); return
+    if not game:
+        await call.answer("Игра уже завершена.", show_alert=True)
+        return
     uid = call.from_user.id
+
     if action == "mdcancel":
-        if uid != game["creator"]: await call.answer("Отменить может создатель.", show_alert=True); return
-        MULTI_DUELS.pop(gid, None); await call.message.edit_text("❌ Коллективная дуэль отменена."); await call.answer(); return
+        if uid != game["creator"]:
+            await call.answer("Отменить может только создатель.", show_alert=True)
+            return
+        MULTI_DUELS.pop(gid, None)
+        await call.message.edit_text("❌ Коллективная дуэль отменена.")
+        await call.answer()
+        return
+
     if action == "mdjoin":
-        if game["phase"] != "lobby": await call.answer("Набор закрыт.", show_alert=True); return
-        if uid in game["players"]: await call.answer("Ты уже участвуешь."); return
-        if len(game["players"]) >= game["limit"] + 1: await call.answer("Мест больше нет.", show_alert=True); return
+        if game["phase"] != "lobby":
+            await call.answer("Набор закрыт.", show_alert=True)
+            return
+        if uid not in game["invited"]:
+            await call.answer("Ты не приглашён в эту дуэль.", show_alert=True)
+            return
+        if uid in game["players"]:
+            await call.answer("Ты уже участвуешь.")
+            return
         game["players"][uid] = call.from_user.full_name
         game["order"].append(uid)
         if len(game["players"]) == game["limit"] + 1:
-            game["alive"] = list(game["order"]); game["phase"] = "active"
+            game["alive"] = list(game["order"])
+            game["phase"] = "active"
             game["current_uid"] = game["alive"][0]
-            text = "⚔️ <b>Коллективная дуэль началась!</b>\n" + "\n".join(f"{i+1}. {n}" for i,n in enumerate(game["players"].values())) + f"\n\nПервый ход: {game['players'][game['current_uid']]}"
-        else:
-            text = f"⚔️ Коллективная дуэль\nУчастники: {len(game['players'])}/{game['limit']+1}\n" + "\n".join(game["players"].values())
-        await call.message.edit_text(text, reply_markup=multi_duel_keyboard(gid, game)); await call.answer("Ты в игре!"); return
-    if action == "mdtargets":
+        await call.message.edit_text(
+            multi_duel_text(game), reply_markup=multi_duel_keyboard(gid, game)
+        )
+        await call.answer("Ты в игре!")
+        return
+
+    if action == "mdact":
         if game["phase"] != "active" or game["current_uid"] != uid:
-            await call.answer("Сейчас не твой ход.", show_alert=True); return
-        rows = [[InlineKeyboardButton(text=game["players"][target], callback_data=f"mdtarget:{gid}:{target}")] for target in game["alive"] if target != uid]
-        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows + [[InlineKeyboardButton(text="❌ Отменить", callback_data=f"mdcancel:{gid}")]]))
-        await call.answer("Выбери, кого выбить."); return
-    if action == "mdtarget":
-        target = int(parts[2])
-        if game["phase"] != "active" or game["current_uid"] != uid or target not in game["alive"] or target == uid:
-            await call.answer("Этот ход недоступен.", show_alert=True); return
-        game["alive"].remove(target)
-        shooter = game["players"][uid]; eliminated = game["players"][target]
-        if len(game["alive"]) == 1:
-            winner = game["players"][game["alive"][0]]; MULTI_DUELS.pop(gid, None)
-            await call.message.edit_text(f"⚔️ <b>Коллективная дуэль завершена!</b>\n{shooter} выбил {eliminated}.\n🏆 Победитель: <b>{winner}</b>", reply_markup=None)
+            await call.answer("Сейчас не твой ход.", show_alert=True)
+            return
+        mode = parts[2]
+        if mode == "dodge":
+            game["dodging"].add(uid)
+            await multi_duel_advance_turn(call, gid, game, f"🛡 {game['players'][uid]} уклонился и пропустил ход.")
+            return
+        if mode not in ("aim", "shoot"):
+            await call.answer("Неизвестное действие.", show_alert=True)
+            return
+        if mode == "shoot" and uid not in game["aimed"]:
+            await call.answer("Сначала прицелься в игрока.", show_alert=True)
+            return
+        targets = [x for x in game["alive"] if x != uid]
+        if not targets:
+            await call.answer("Нет доступных целей.", show_alert=True)
+            return
+        game["pending_action"][uid] = mode
+        rows = [[InlineKeyboardButton(
+            text=game["players"][target],
+            callback_data=f"mdtarget:{gid}:{target}"
+        )] for target in targets]
+        rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data=f"mdback:{gid}")])
+        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await call.answer("Выбери цель.")
+        return
+
+    if action == "mdback":
+        if game["phase"] == "active" and game["current_uid"] == uid:
+            await call.message.edit_reply_markup(reply_markup=multi_duel_keyboard(gid, game))
+            await call.answer()
         else:
-            current_index = game["order"].index(uid)
-            for offset in range(1, len(game["order"]) + 1):
-                candidate = game["order"][(current_index + offset) % len(game["order"])]
-                if candidate in game["alive"]:
-                    game["current_uid"] = candidate; break
-            next_uid = game["current_uid"]
-            await call.message.edit_text(f"⚔️ <b>Коллективная дуэль</b>\n{shooter} выбил {eliminated}.\nОстались: " + ", ".join(game["players"][x] for x in game["alive"]) + f"\n\nХод: <b>{game['players'][next_uid]}</b>", reply_markup=multi_duel_keyboard(gid, game))
-        await call.answer("Игрок выбыл."); return
+            await call.answer("Недоступно.", show_alert=True)
+        return
+
+    if action == "mdtarget":
+        if game["phase"] != "active" or game["current_uid"] != uid:
+            await call.answer("Сейчас не твой ход.", show_alert=True)
+            return
+        target = int(parts[2])
+        mode = game["pending_action"].pop(uid, None)
+        if target not in game["alive"] or target == uid or mode not in ("aim", "shoot"):
+            await call.answer("Это действие недоступно.", show_alert=True)
+            return
+        if mode == "aim":
+            game["aimed"][uid] = target
+            await multi_duel_advance_turn(
+                call, gid, game, f"🎯 {game['players'][uid]} прицелился в {game['players'][target]}."
+            )
+            return
+
+        # Выстрел: прицеливание повышает точность; уклонение гарантированно спасает от одного выстрела.
+        if target in game["dodging"]:
+            game["dodging"].discard(target)
+            note = f"💨 {game['players'][target]} уклонился от выстрела {game['players'][uid]}!"
+        else:
+            hit = random.random() < 0.85
+            if hit:
+                game["alive"].remove(target)
+                game["aimed"].pop(uid, None)
+                note = f"💥 {game['players'][uid]} выбил игрока {game['players'][target]}!"
+            else:
+                note = f"❗ {game['players'][uid]} промахнулся по {game['players'][target]}."
+        if len(game["alive"]) == 1:
+            winner_id = game["alive"][0]
+            MULTI_DUELS.pop(gid, None)
+            await call.message.edit_text(
+                "🏆 <b>Коллективная дуэль завершена!</b>\n" + note +
+                f"\n\nПобедитель: <b>{game['players'][winner_id]}</b>"
+            )
+            await call.answer("Игра завершена!")
+            return
+        await multi_duel_advance_turn(call, gid, game, note)
+        return
+
+
+async def multi_duel_advance_turn(call, gid, game, note):
+    current_index = game["order"].index(game["current_uid"])
+    for offset in range(1, len(game["order"]) + 1):
+        candidate = game["order"][(current_index + offset) % len(game["order"])]
+        if candidate in game["alive"]:
+            game["current_uid"] = candidate
+            break
+    await call.message.edit_text(
+        multi_duel_text(game, note), reply_markup=multi_duel_keyboard(gid, game)
+    )
+    await call.answer("Ход завершён.")
 
 
 # ==================== МАФИЯ ====================
@@ -3001,7 +3146,7 @@ async def cmd_mafia(message: types.Message):
         "lobby_deadline": loop.time() + MAFIA_LOBBY_SECONDS,
         "lobby_message_id": None,
         "lobby_task": None,
-        "players": {},
+        "players": {message.from_user.id: {"name": message.from_user.full_name, "role": None, "alive": True}},
         "round": 1,
         "votes": {},
         "mafia_choices": {},
