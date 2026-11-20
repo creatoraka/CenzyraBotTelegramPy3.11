@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode, ChatType
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
-    BusinessConnection
+    BusinessConnection, ChatPermissions
 )
 
 # ==================== КОНФИГ ====================
@@ -40,6 +40,7 @@ TEMP_BANS = {}
 TEMP_MUTES = {}
 RPS_GAMES = {}
 RPS_INVITES = {}
+RPS_REMATCH = {}          # {rematch_id: {"players": set(), "clicked": set(), "chat_id": ..., "a_id": ..., "b_id": ..., "a_name": ..., "b_name": ...}}
 CENSOR_ENABLED = {}
 CAPS_ENABLED = {}
 LINKS_ENABLED = {}
@@ -386,25 +387,17 @@ def has_bad_words(text: str) -> bool:
     if not text:
         return False
 
-    # Слитный вариант (без пробелов и знаков) — ловит «иди нахуй», «похуй» и т.д.
-    flat = normalize(text)
-    if flat and flat not in WHITELIST:
-        for bad in SHORT_BAD:
-            if len(bad) >= 3 and bad in flat:
-                return True
-        for bad in LONG_BAD:
-            if bad in flat:
-                return True
-
     raw_words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
     norm_words = [normalize(w) for w in raw_words if normalize(w)]
 
     if not norm_words:
         return False
 
+    # Одно слово из whitelist — пропускаем
     if len(norm_words) == 1 and norm_words[0] in WHITELIST:
         return False
 
+    # Проверка по словам
     for w in norm_words:
         if w in WHITELIST:
             continue
@@ -420,6 +413,17 @@ def has_bad_words(text: str) -> bool:
         for bad in SHORT_BAD:
             if len(bad) >= 3 and bad in w:
                 return True
+
+    # Только если нет пробелов (одно «слово» / склеено) — проверяем слитный текст
+    if " " not in text.strip():
+        flat = normalize(text)
+        if flat and flat not in WHITELIST:
+            for bad in SHORT_BAD:
+                if len(bad) >= 3 and bad in flat:
+                    return True
+            for bad in LONG_BAD:
+                if bad in flat:
+                    return True
 
     return False
 
@@ -704,6 +708,16 @@ async def bot_can_restrict(message: types.Message) -> bool:
         return False
 
 
+async def bot_can_promote(message: types.Message) -> bool:
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(message.chat.id, me.id)
+        return bool(getattr(member, "can_promote_members", False))
+    except Exception as e:
+        print(f"bot_can_promote: {e}")
+        return False
+
+
 def parse_minutes(args):
     for a in args[1:]:
         if a.isdigit() and len(a) <= 5:
@@ -928,14 +942,6 @@ async def on_business_message(message: types.Message):
         text = (message.text or "").strip()
         text_low = text.lower()
 
-        print(
-            f"\n=== BUSINESS MESSAGE ===\n"
-            f"conn_id={conn_id}\n"
-            f"user_id={user_id}\n"
-            f"chat_id={message.chat.id}\n"
-            f"text={text!r}\n"
-        )
-
         if not conn_id:
             return
 
@@ -1107,43 +1113,101 @@ async def cmd_superlist(message: types.Message):
     await message.answer(text)
 
 
-# ==================== ГОЛОСОВОЙ ЧАТ ====================
+# ==================== ПРОМОУТ / ДЕМОУТ ====================
 
-@dp.message(Command("voice"))
-@dp.message(Command("startvoice"))
-async def cmd_start_voice(message: types.Message):
+@dp.message(Command("promote"))
+@dp.message(Command("admin"))
+async def cmd_promote(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.reply("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы и супер-админы.")
+        await message.reply("❌ Только админы.")
+        return
+    if not await bot_can_promote(message):
+        await message.reply("❌ У бота нет права назначать админов.")
         return
 
-    # Bot API не поддерживает запуск голосовых чатов ботом
-    await message.answer(
-        "🎤 <b>Голосовой чат</b>\n\n"
-        "Bot API не позволяет ботам запускать голосовые чаты.\n"
-        "Запусти вручную:\n"
-        "1. Открой меню чата (три точки)\n"
-        "2. Выбери «Голосовой чат» / «Video chat»\n"
-        "3. Нажми «Начать»"
-    )
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
+        return
+
+    if user_id == BOT_ID:
+        await message.reply("🤖 Нельзя назначить бота.")
+        return
+    if user_id == message.from_user.id:
+        await message.reply("❌ Нельзя назначить самого себя.")
+        return
+
+    # защита супер-админов не нужна при промоуте
+
+    try:
+        await bot.promote_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            can_manage_chat=True,
+            can_delete_messages=True,
+            can_manage_video_chats=True,
+            can_restrict_members=True,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=True,
+            can_pin_messages=True,
+        )
+        await message.answer(f"✅ <b>{name}</b> назначен администратором.")
+    except Exception as e:
+        await message.reply(f"❌ {e}")
 
 
-@dp.message(Command("endvoice"))
-async def cmd_end_voice(message: types.Message):
+@dp.message(Command("demote"))
+@dp.message(Command("unadmin"))
+async def cmd_demote(message: types.Message):
     if message.chat.type == ChatType.PRIVATE:
-        await message.reply("❌ Только в группах.")
         return
     if not await is_admin(message):
-        await message.reply("❌ Только админы и супер-админы.")
+        await message.reply("❌ Только админы.")
+        return
+    if not await bot_can_promote(message):
+        await message.reply("❌ У бота нет права снимать админов.")
         return
 
-    await message.answer(
-        "🔇 <b>Завершение голосового чата</b>\n\n"
-        "Bot API не позволяет ботам завершать голосовые чаты.\n"
-        "Заверши вручную через меню активного голосового чата → «Завершить»."
-    )
+    user_id, name, err = await resolve_target(message)
+    if err:
+        await message.reply(err)
+        return
+
+    if user_id == BOT_ID:
+        await message.reply("🤖 Нельзя снять бота.")
+        return
+    if user_id == message.from_user.id:
+        await message.reply("❌ Нельзя снять самого себя.")
+        return
+
+    # нельзя снимать супер-админов
+    for uname, cached_id in USERNAME_CACHE.get(message.chat.id, {}).items():
+        if cached_id == user_id and uname in SUPER_ADMINS:
+            await message.reply(f"🛡 <b>{name}</b> — супер-админ. Нельзя снять.")
+            return
+    if user_id in SUPER_ADMIN_IDS:
+        await message.reply(f"🛡 <b>{name}</b> — супер-админ. Нельзя снять.")
+        return
+
+    try:
+        await bot.promote_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            can_manage_chat=False,
+            can_delete_messages=False,
+            can_manage_video_chats=False,
+            can_restrict_members=False,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+        await message.answer(f"✅ <b>{name}</b> снят с администраторов.")
+    except Exception as e:
+        await message.reply(f"❌ {e}")
 
 
 # ==================== КОМАНДЫ ====================
@@ -1157,10 +1221,9 @@ async def cmd_start(message: types.Message):
         "🧹 Чищу сервисные сообщения\n"
         "📢 Созываю всех через /everyone\n"
         "🎲 Развлекательные команды\n"
-        "🔨 Модерация\n"
+        "🔨 Модерация + назначение админов\n"
         "🔠 Защита от капслока\n"
-        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n"
-        "🎤 Голосовой чат: /voice и /endvoice (только админы)\n\n"
+        "🔗 Защита от ссылок (кроме youtube.com/shorts)\n\n"
         "💼 Если я подключён к твоему Business-аккаунту, "
         "напиши мне в личку <code>.мут</code> или <code>.хелп</code>.\n\n"
         "📌 /help для списка команд."
@@ -1210,13 +1273,13 @@ async def cmd_help(message: types.Message):
         "• /vmute &lt;мин&gt; — мут голосовых\n"
         "• /unmute — снять все муты\n"
         "• /users — кого бот знает (для @username)\n\n"
+        "<b>Назначение админов:</b>\n"
+        "• /promote или /admin — назначить админом\n"
+        "• /demote или /unadmin — снять с админки\n\n"
         "<b>Супер-админы:</b>\n"
         "• /addsuper @user — добавить в whitelist\n"
         "• /delsuper @user — убрать из whitelist\n"
         "• /superlist — список супер-админов\n\n"
-        "<b>Голосовой чат (только админы + супер-админы):</b>\n"
-        "• /voice или /startvoice — инструкция по запуску\n"
-        "• /endvoice — инструкция по завершению\n\n"
         "<b>Управление ботом:</b>\n"
         "• /censor — включить цензуру\n"
         "• /uncensor — выключить цензуру\n"
@@ -1492,6 +1555,15 @@ def rps_invite_keyboard(invite_id):
     ]])
 
 
+def rps_rematch_keyboard(rematch_id, count=0):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"🔄 Реванш ({count}/2)",
+            callback_data=f"rpsr:{rematch_id}"
+        )
+    ]])
+
+
 def make_game_id(chat_id, user_id):
     return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
 
@@ -1593,6 +1665,71 @@ async def resolve_target_for_rps(message: types.Message):
 
 @dp.callback_query()
 async def rps_callback(call: CallbackQuery):
+    # --- реванш ---
+    if call.data.startswith("rpsr:"):
+        rematch_id = call.data.split(":", 1)[1]
+        data = RPS_REMATCH.get(rematch_id)
+        if not data:
+            await call.answer("Реванш уже недоступен.", show_alert=True)
+            try:
+                await call.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        uid = call.from_user.id
+        if uid not in data["players"]:
+            await call.answer("Реванш только для участников этой игры.", show_alert=True)
+            return
+
+        if uid in data["clicked"]:
+            await call.answer("Ты уже нажал реванш.", show_alert=True)
+            return
+
+        data["clicked"].add(uid)
+        count = len(data["clicked"])
+
+        if count < 2:
+            try:
+                await call.message.edit_reply_markup(
+                    reply_markup=rps_rematch_keyboard(rematch_id, count)
+                )
+            except Exception:
+                pass
+            await call.answer(f"Реванш: {count}/2")
+            return
+
+        # оба нажали — стартуем новую игру
+        await call.answer("Реванш!")
+        RPS_REMATCH.pop(rematch_id, None)
+
+        game_id = make_game_id(data["chat_id"], data["a_id"])
+        RPS_GAMES[game_id] = {
+            "player_a": data["a_id"],
+            "player_b": data["b_id"],
+            "choice_a": None,
+            "choice_b": None,
+            "turn": "a",
+            "is_bot": False,
+            "a_name": data["a_name"],
+            "a_mention": data["a_mention"],
+            "b_name": data["b_name"],
+            "b_mention": data["b_mention"],
+            "chat_id": data["chat_id"],
+        }
+
+        try:
+            await call.message.edit_text(
+                f"🎮 <b>Реванш!</b>\n\n"
+                f"🥊 {data['a_mention']} vs {data['b_mention']}\n\n"
+                f"👉 <b>{data['a_name']}</b>, выбери ход первым:",
+                reply_markup=rps_keyboard(game_id)
+            )
+        except Exception:
+            pass
+        return
+
+    # --- приглашение ---
     if call.data.startswith("rpsi:"):
         parts = call.data.split(":")
         if len(parts) != 3:
@@ -1650,6 +1787,7 @@ async def rps_callback(call: CallbackQuery):
         RPS_INVITES.pop(invite_id, None)
         return
 
+    # --- ход ---
     if call.data.startswith("rps:"):
         parts = call.data.split(":")
         if len(parts) != 3:
@@ -1680,6 +1818,8 @@ async def rps_callback(call: CallbackQuery):
                 verdict = f"🎉 Победил {game['a_name']}!"
             else:
                 verdict = "😢 Победил бот!"
+
+            # для игры с ботом реванш не делаем (или можно, но пока только PvP)
             try:
                 await call.message.edit_text(
                     f"🎮 <b>КНБ</b>\n\n"
@@ -1718,13 +1858,28 @@ async def rps_callback(call: CallbackQuery):
                 verdict = f"🏆 Победил {game['a_mention']}!"
             else:
                 verdict = f"🏆 Победил {game['b_mention']}!"
+
+            # создаём реванш
+            rematch_id = f"{game['chat_id']}_{game['player_a']}_{game['player_b']}_{random.randint(10000, 99999)}"
+            RPS_REMATCH[rematch_id] = {
+                "players": {game["player_a"], game["player_b"]},
+                "clicked": set(),
+                "chat_id": game["chat_id"],
+                "a_id": game["player_a"],
+                "b_id": game["player_b"],
+                "a_name": game["a_name"],
+                "b_name": game["b_name"],
+                "a_mention": game["a_mention"],
+                "b_mention": game["b_mention"],
+            }
+
             try:
                 await call.message.edit_text(
                     f"🎮 <b>КНБ результат</b>\n\n"
                     f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
                     f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n"
                     f"<b>{verdict}</b>",
-                    reply_markup=None
+                    reply_markup=rps_rematch_keyboard(rematch_id, 0)
                 )
             except Exception:
                 pass
@@ -1889,7 +2044,7 @@ async def cmd_mute(message: types.Message):
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user_id,
-            permissions=types.ChatPermissions(can_send_messages=False),
+            permissions=ChatPermissions(can_send_messages=False),
             until_date=until_ts
         )
         await message.answer(f"🔇 {name} замучен на <b>{minutes} мин.</b>")
@@ -1920,7 +2075,7 @@ async def cmd_vmute(message: types.Message):
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user_id,
-            permissions=types.ChatPermissions(
+            permissions=ChatPermissions(
                 can_send_messages=True,
                 can_send_audios=False,
                 can_send_documents=False,
@@ -1955,7 +2110,7 @@ async def cmd_unmute(message: types.Message):
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user_id,
-            permissions=types.ChatPermissions(
+            permissions=ChatPermissions(
                 can_send_messages=True,
                 can_send_audios=True,
                 can_send_documents=True,
@@ -2019,7 +2174,6 @@ async def filter_messages(message: types.Message):
             pass
         return
 
-    # --- Защита от капслока ---
     if CAPS_ENABLED.get(message.chat.id, False) and is_caps_lock(message.text):
         try:
             await message.delete()
@@ -2028,7 +2182,6 @@ async def filter_messages(message: types.Message):
             print(f"Не удалил капслок: {e}")
         return
 
-    # --- Защита от ссылок ---
     if LINKS_ENABLED.get(message.chat.id, False) and has_forbidden_links(message.text):
         try:
             await message.delete()
@@ -2037,7 +2190,6 @@ async def filter_messages(message: types.Message):
             print(f"Не удалил ссылку: {e}")
         return
 
-    # --- Цензура мата ---
     if not CENSOR_ENABLED.get(message.chat.id, True):
         track_message(message.chat.id, message.from_user, is_bad=False)
         return
@@ -2089,12 +2241,11 @@ async def set_commands():
         types.BotCommand(command="mute", description="Мут"),
         types.BotCommand(command="vmute", description="Мут голосовых"),
         types.BotCommand(command="unmute", description="Размут"),
+        types.BotCommand(command="promote", description="Назначить админом"),
+        types.BotCommand(command="demote", description="Снять с админки"),
         types.BotCommand(command="addsuper", description="Добавить супер-админа"),
         types.BotCommand(command="delsuper", description="Убрать супер-админа"),
         types.BotCommand(command="superlist", description="Список супер-админов"),
-        types.BotCommand(command="voice", description="Запуск голосового чата"),
-        types.BotCommand(command="startvoice", description="Запуск голосового чата"),
-        types.BotCommand(command="endvoice", description="Завершение голосового чата"),
     ]
     try:
         await bot.set_my_commands(commands)
