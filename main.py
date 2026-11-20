@@ -2580,26 +2580,60 @@ async def cmd_multi_duel(message: types.Message):
         await message.reply("Укажите от 2 до 9 приглашённых игроков.")
         return
 
-    # Приглашённые задаются через Telegram text_mention (выбор пользователя из подсказки)
-    # либо числовыми Telegram ID. Неизвестные участники не смогут войти.
+    # Поддерживаем все варианты Telegram-упоминаний: выбранное имя (text_mention),
+    # обычное @username, tg://user?id=..., ответ на сообщение и числовые ID.
     invited = set()
+    text = message.text or ""
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        replied_user = message.reply_to_message.from_user
+        if not replied_user.is_bot:
+            invited.add(replied_user.id)
+            cache_user(message.chat.id, replied_user)
+
+    def entity_text(entity):
+        # Telegram offsets измеряются в UTF-16 code units.
+        raw = text.encode("utf-16-le")
+        return raw[entity.offset * 2:(entity.offset + entity.length) * 2].decode("utf-16-le", errors="ignore")
+
+    unresolved = []
     for ent in (message.entities or []):
         if ent.type == "text_mention" and ent.user:
-            invited.add(ent.user.id)
+            if not ent.user.is_bot:
+                invited.add(ent.user.id)
+                cache_user(message.chat.id, ent.user)
+        elif ent.type == "mention":
+            username = entity_text(ent).lstrip("@")
+            uid = resolve_username(message.chat.id, username)
+            if uid:
+                invited.add(uid)
+            else:
+                unresolved.append("@" + username)
+        elif ent.type == "text_link" and getattr(ent, "url", None):
+            match = re.search(r"tg://user\?id=(\d+)", ent.url)
+            if match:
+                invited.add(int(match.group(1)))
+
     for token in args[2:]:
+        token = token.strip().strip(",")
         if token.isdigit():
             invited.add(int(token))
-    if len(invited) != extra:
+        elif token.startswith("@"):
+            uid = resolve_username(message.chat.id, token)
+            if uid:
+                invited.add(uid)
+            elif token not in unresolved:
+                unresolved.append(token)
+
+    invited.discard(message.from_user.id)
+    if unresolved or len(invited) != extra:
+        details = (" Не удалось распознать: " + ", ".join(unresolved) + "." if unresolved else "")
         await message.reply(
-            f"Нужно указать ровно {extra} приглашённых: /multi-duel {extra} и отметить "
-            "нужных людей через упоминание с выбором пользователя (text mention) "
-            "или добавить их Telegram ID."
+            f"Нужно указать ровно {extra} разных приглашённых. Распознано: {len(invited)}.{details}\n"
+            "Обычные @username распознаются, если бот уже видел сообщения этих людей в этом чате. "
+            "Также можно ответить на сообщение игрока, выбрать Telegram-упоминание или указать ID."
         )
         return
-    if message.from_user.id in invited:
-        await message.reply("Нельзя приглашать самого себя.")
-        return
-
     gid = make_game_id(message.chat.id, message.from_user.id)
     players = {message.from_user.id: message.from_user.full_name}
     game = {
@@ -3086,12 +3120,31 @@ async def mafia_resolve_votes(chat_id: int):
 
 async def mafia_refresh_lobby(chat_id):
     game = MAFIA_GAMES.get(chat_id)
-    if not game or game.get("phase") != "lobby": return
+    if not game or game.get("phase") != "lobby" or not game.get("lobby_message_id"):
+        return
+    count = len(game["players"])
+    markup = mafia_join_keyboard(chat_id, count)
     try:
-        await bot.edit_message_text(mafia_lobby_text(game), chat_id, game["lobby_message_id"],
-                                    reply_markup=mafia_join_keyboard(chat_id, len(game["players"])))
-    except Exception:
-        pass
+        # Синхронно обновляем список участников и счётчик на кнопке.
+        await bot.edit_message_text(
+            text=mafia_lobby_text(game),
+            chat_id=chat_id,
+            message_id=game["lobby_message_id"],
+            reply_markup=markup,
+        )
+    except Exception as exc:
+        # Если текст не изменился, всё равно пробуем обновить клавиатуру.
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=game["lobby_message_id"],
+                reply_markup=markup,
+            )
+        except Exception as markup_exc:
+            logging.warning(
+                "Не удалось обновить лобби мафии в чате %s: %s; markup: %s",
+                chat_id, exc, markup_exc,
+            )
 
 async def mafia_lobby_timeout(chat_id):
     try:
@@ -3156,7 +3209,7 @@ async def cmd_mafia(message: types.Message):
     }
     lobby_msg = await message.answer(
         mafia_lobby_text(MAFIA_GAMES[chat_id]),
-        reply_markup=mafia_join_keyboard(chat_id, 0)
+        reply_markup=mafia_join_keyboard(chat_id, len(MAFIA_GAMES[chat_id]["players"]))
     )
     MAFIA_GAMES[chat_id]["lobby_message_id"] = lobby_msg.message_id
     MAFIA_GAMES[chat_id]["lobby_task"] = asyncio.create_task(mafia_lobby_timeout(chat_id))
