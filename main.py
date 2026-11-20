@@ -1243,7 +1243,9 @@ async def cmd_help(message: types.Message):
         "• /duel @user или reply — вызвать на дуэль\n"
         "• /dice — бросить кубик (1–6)\n"
         "• /coin — орёл или решка\n"
-        "• /ball &lt;вопрос&gt; — магический шар\n\n"
+        "• /ball &lt;вопрос&gt; — магический шар\n"
+        "• /mafia — создать игру в мафию\n"
+        "• /mafia_cancel — отменить набор игроков\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📊 <b>Статистика:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -2464,6 +2466,550 @@ async def cmd_unmute(message: types.Message):
         await message.reply(f"❌ {e}")
 
 
+
+
+# ==================== МАФИЯ ====================
+
+MAFIA_GAMES = {}
+MAFIA_DISCUSSION_SECONDS = 180
+
+
+def mafia_join_keyboard(chat_id: int, can_start: bool = False):
+    rows = [[InlineKeyboardButton(
+        text="🎭 Зайти в игру",
+        callback_data=f"mafia_join:{chat_id}"
+    )]]
+    if can_start:
+        rows.append([InlineKeyboardButton(
+            text="▶️ Начать игру",
+            callback_data=f"mafia_start:{chat_id}"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def mafia_action_keyboard(chat_id: int, action: str, targets: list):
+    rows = []
+    for user_id, name in targets:
+        rows.append([InlineKeyboardButton(
+            text=name[:60],
+            callback_data=f"mafia_act:{chat_id}:{action}:{user_id}"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def mafia_mention(user_id: int, name: str) -> str:
+    safe_name = (name or f"ID {user_id}").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+def mafia_alive_targets(game, exclude_id=None):
+    return [
+        (uid, player["name"])
+        for uid, player in game["players"].items()
+        if player["alive"] and uid != exclude_id
+    ]
+
+
+def mafia_role_distribution(player_count: int):
+    # Количество игроков с особыми ролями не превышает количество мирных.
+    mafia_count = max(1, (player_count - 4) // 4 + 1)
+    sheriff_count = 1 if player_count >= 6 else 0
+    doctor_count = 1
+    special_count = mafia_count + sheriff_count + doctor_count
+    civilian_count = player_count - special_count
+
+    while special_count > civilian_count and mafia_count > 1:
+        mafia_count -= 1
+        special_count = mafia_count + sheriff_count + doctor_count
+        civilian_count = player_count - special_count
+
+    if special_count > civilian_count:
+        sheriff_count = 0
+        special_count = mafia_count + doctor_count
+        civilian_count = player_count - special_count
+
+    return mafia_count, doctor_count, sheriff_count, civilian_count
+
+
+def mafia_make_roles(player_ids):
+    count = len(player_ids)
+    mafia_count, doctor_count, sheriff_count, _ = mafia_role_distribution(count)
+    roles = (
+        ["mafia"] * mafia_count
+        + ["doctor"] * doctor_count
+        + ["sheriff"] * sheriff_count
+        + ["civilian"] * (count - mafia_count - doctor_count - sheriff_count)
+    )
+    random.shuffle(roles)
+    return dict(zip(player_ids, roles))
+
+
+def mafia_role_title(role):
+    return {
+        "mafia": "🔪 Мафия",
+        "doctor": "🩺 Доктор",
+        "sheriff": "⭐ Шериф",
+        "civilian": "👤 Мирный житель",
+    }.get(role, "Неизвестная роль")
+
+
+async def mafia_start_night(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game:
+        return
+    alive = mafia_alive_targets(game)
+    if not alive:
+        await mafia_finish(chat_id, "Игра завершена: не осталось игроков.")
+        return
+
+    game["phase"] = "night_mafia"
+    game["night_choices"] = {}
+    game["mafia_choices"] = {}
+    game["doctor_choice"] = None
+    game["sheriff_choice"] = None
+
+    mafia_ids = [
+        uid for uid, player in game["players"].items()
+        if player["alive"] and player["role"] == "mafia"
+    ]
+    targets = mafia_alive_targets(game)
+    keyboard = mafia_action_keyboard(chat_id, "kill", targets)
+
+    for uid in mafia_ids:
+        try:
+            await bot.send_message(
+                uid,
+                "🌙 <b>Ночь. Твой ход.</b>\nВыбери игрока, которого мафия должна устранить:",
+                reply_markup=keyboard
+            )
+        except Exception:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ Не удалось отправить ночное действие игроку {mafia_mention(uid, game['players'][uid]['name'])}."
+            )
+
+    if not mafia_ids:
+        await mafia_finish(chat_id, "Ошибка игры: в живых не осталось мафии.")
+        return
+
+
+async def mafia_advance_after_mafia(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game["phase"] != "night_mafia":
+        return
+    mafia_ids = [
+        uid for uid, player in game["players"].items()
+        if player["alive"] and player["role"] == "mafia"
+    ]
+    if not all(uid in game["mafia_choices"] for uid in mafia_ids):
+        return
+
+    counts = {}
+    for target_id in game["mafia_choices"].values():
+        counts[target_id] = counts.get(target_id, 0) + 1
+    max_votes = max(counts.values())
+    chosen = random.choice([uid for uid, votes in counts.items() if votes == max_votes])
+    game["night_victim"] = chosen
+    game["phase"] = "night_doctor"
+
+    doctors = [
+        uid for uid, player in game["players"].items()
+        if player["alive"] and player["role"] == "doctor"
+    ]
+    targets = mafia_alive_targets(game)
+    keyboard = mafia_action_keyboard(chat_id, "heal", targets)
+    for uid in doctors:
+        try:
+            await bot.send_message(
+                uid,
+                "🩺 <b>Ход доктора.</b>\nКого вылечить этой ночью? Можно выбрать себя.",
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
+
+    if not doctors:
+        await mafia_advance_after_doctor(chat_id)
+
+
+async def mafia_advance_after_doctor(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game["phase"] != "night_doctor":
+        return
+    doctors = [
+        uid for uid, player in game["players"].items()
+        if player["alive"] and player["role"] == "doctor"
+    ]
+    if doctors and game["doctor_choice"] is None:
+        return
+
+    game["phase"] = "night_sheriff"
+    sheriffs = [
+        uid for uid, player in game["players"].items()
+        if player["alive"] and player["role"] == "sheriff"
+    ]
+    if not sheriffs:
+        await mafia_resolve_night(chat_id)
+        return
+
+    targets = mafia_alive_targets(game)
+    keyboard = mafia_action_keyboard(chat_id, "check", targets)
+    for uid in sheriffs:
+        try:
+            await bot.send_message(
+                uid,
+                "⭐ <b>Ход шерифа.</b>\nКого проверить?",
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
+
+
+async def mafia_resolve_night(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game:
+        return
+    victim = game.get("night_victim")
+    healed = game.get("doctor_choice")
+    if victim is not None and victim != healed and victim in game["players"]:
+        game["players"][victim]["alive"] = False
+        result = f"🌅 Наступило утро. Ночью выбыл игрок {mafia_mention(victim, game['players'][victim]['name'])}."
+    else:
+        result = "🌅 Наступило утро. Этой ночью никто не выбыл."
+
+    await bot.send_message(chat_id, result)
+    await mafia_start_discussion(chat_id)
+
+
+async def mafia_start_discussion(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game:
+        return
+    game["phase"] = "discussion"
+    game["votes"] = {}
+    game["discussion_task"] = asyncio.create_task(
+        mafia_discussion_timer(chat_id, game["round"])
+    )
+    await bot.send_message(
+        chat_id,
+        "💬 <b>Обсуждение началось!</b>\n"
+        "У вас есть 3 минуты, чтобы обсудить, кто может быть мафией.\n"
+        "После обсуждения начнётся голосование."
+    )
+
+
+async def mafia_discussion_timer(chat_id: int, round_number: int):
+    try:
+        await asyncio.sleep(MAFIA_DISCUSSION_SECONDS)
+        game = MAFIA_GAMES.get(chat_id)
+        if not game or game["phase"] != "discussion" or game["round"] != round_number:
+            return
+        await mafia_start_voting(chat_id)
+    except asyncio.CancelledError:
+        return
+
+
+async def mafia_start_voting(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game:
+        return
+    game["phase"] = "voting"
+    game["votes"] = {}
+    alive = mafia_alive_targets(game)
+    keyboard = mafia_action_keyboard(chat_id, "vote", alive)
+    for uid, player in game["players"].items():
+        if not player["alive"]:
+            continue
+        try:
+            await bot.send_message(
+                uid,
+                "🗳 <b>Голосование!</b>\nВыбери игрока, которого нужно исключить:",
+                reply_markup=keyboard
+            )
+        except Exception:
+            pass
+    await bot.send_message(chat_id, "🗳 <b>Началось голосование!</b> Проверь личные сообщения бота.")
+
+
+async def mafia_finish(chat_id: int, reason: str):
+    game = MAFIA_GAMES.pop(chat_id, None)
+    if not game:
+        return
+    task = game.get("discussion_task")
+    if task and not task.done():
+        task.cancel()
+
+    role_lines = []
+    for uid, player in game["players"].items():
+        role_lines.append(
+            f"• {mafia_mention(uid, player['name'])} — <b>{mafia_role_title(player['role'])}</b>"
+        )
+    await bot.send_message(
+        chat_id,
+        f"🏁 <b>Игра окончена!</b>\n{reason}\n\n"
+        f"🎭 <b>Все роли:</b>\n" + "\n".join(role_lines)
+    )
+
+
+async def mafia_resolve_votes(chat_id: int):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game["phase"] != "voting":
+        return
+    alive_ids = [uid for uid, p in game["players"].items() if p["alive"]]
+    if not all(uid in game["votes"] for uid in alive_ids):
+        return
+
+    counts = {}
+    for target_id in game["votes"].values():
+        counts[target_id] = counts.get(target_id, 0) + 1
+    if not counts:
+        await bot.send_message(chat_id, "Голосование не состоялось.")
+        game["round"] += 1
+        await mafia_start_night(chat_id)
+        return
+
+    top = max(counts.values())
+    winners = [uid for uid, votes in counts.items() if votes == top]
+    if len(winners) != 1:
+        await bot.send_message(chat_id, "⚖️ Ничья! Никто не выбыл.")
+        game["round"] += 1
+        await mafia_start_night(chat_id)
+        return
+
+    eliminated = winners[0]
+    game["players"][eliminated]["alive"] = False
+    await bot.send_message(
+        chat_id,
+        f"⚖️ Голосование завершено. "
+        f"{mafia_mention(eliminated, game['players'][eliminated]['name'])} выбыл из игры.\n"
+        "Его роль пока не раскрывается."
+    )
+
+    if game["players"][eliminated]["role"] == "mafia":
+        await mafia_finish(chat_id, "✅ Мирные жители вычислили мафию голосованием!")
+        return
+
+    game["round"] += 1
+    await mafia_start_night(chat_id)
+
+
+@dp.message(Command("mafia"))
+@dp.message(Command("мафия"))
+async def cmd_mafia(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer("🎭 Создавать игру можно только в группе.")
+        return
+    chat_id = message.chat.id
+    if chat_id in MAFIA_GAMES:
+        await message.answer("В этом чате уже есть активная игра или набор в мафию.")
+        return
+
+    MAFIA_GAMES[chat_id] = {
+        "phase": "lobby",
+        "players": {},
+        "round": 1,
+        "votes": {},
+        "mafia_choices": {},
+        "doctor_choice": None,
+        "sheriff_choice": None,
+        "discussion_task": None,
+    }
+    await message.answer(
+        "🎭 <b>Новая игра в мафию!</b>\n\n"
+        "Нажимайте «Зайти в игру». Для начала нужно минимум 4 игрока.\n"
+        "Когда все готовы, нажмите «Начать игру».",
+        reply_markup=mafia_join_keyboard(chat_id)
+    )
+
+
+@dp.callback_query(lambda c: (c.data or "").startswith("mafia_join:"))
+async def mafia_join_callback(call: CallbackQuery):
+    try:
+        chat_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректная игра.", show_alert=True)
+        return
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game["phase"] != "lobby":
+        await call.answer("Набор уже закрыт.", show_alert=True)
+        return
+    if call.from_user.id in game["players"]:
+        await call.answer("Ты уже в игре.")
+        return
+
+    game["players"][call.from_user.id] = {
+        "name": call.from_user.full_name,
+        "role": None,
+        "alive": True,
+    }
+    count = len(game["players"])
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=mafia_join_keyboard(chat_id, count >= 4)
+        )
+    except Exception:
+        pass
+    await call.answer(f"Ты в игре! Игроков: {count}")
+
+
+@dp.callback_query(lambda c: (c.data or "").startswith("mafia_start:"))
+async def mafia_start_callback(call: CallbackQuery):
+    try:
+        chat_id = int(call.data.split(":")[1])
+    except (ValueError, IndexError):
+        await call.answer("Некорректная игра.", show_alert=True)
+        return
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game["phase"] != "lobby":
+        await call.answer("Игра уже запущена или закрыта.", show_alert=True)
+        return
+    if len(game["players"]) < 4:
+        await call.answer("Нужно минимум 4 игрока.", show_alert=True)
+        return
+
+    player_ids = list(game["players"])
+    roles = mafia_make_roles(player_ids)
+    for uid, role in roles.items():
+        game["players"][uid]["role"] = role
+
+    # Роли рассылаются автоматически сразу после старта — отдельной кнопки нет.
+    failed = []
+    for uid, role in roles.items():
+        try:
+            await bot.send_message(
+                uid,
+                f"🎭 <b>Игра в мафию началась!</b>\n\n"
+                f"Твоя роль: <b>{mafia_role_title(role)}</b>\n\n"
+                + (
+                    "Твоя задача — устранить мирных жителей. Выбирай цель ночью."
+                    if role == "mafia" else
+                    "Твоя задача — помочь мирным жителям вычислить мафию."
+                )
+            )
+        except Exception:
+            failed.append(uid)
+
+    if failed:
+        MAFIA_GAMES.pop(chat_id, None)
+        await call.message.edit_text(
+            "❌ Не удалось отправить роль одному или нескольким игрокам.\n"
+            "Каждый участник должен открыть личный чат с ботом и нажать /start.\n"
+            "Создайте игру заново после этого."
+        )
+        await call.answer("Не всем удалось доставить роль.", show_alert=True)
+        return
+
+    game["phase"] = "starting"
+    await call.message.edit_text(
+        f"🎭 <b>Игра началась!</b>\n"
+        f"Участников: {len(player_ids)}\n"
+        "Роли автоматически отправлены каждому игроку в личные сообщения."
+    )
+    await call.answer("Игра началась!")
+    await mafia_start_night(chat_id)
+
+
+@dp.callback_query(lambda c: (c.data or "").startswith("mafia_act:"))
+async def mafia_action_callback(call: CallbackQuery):
+    parts = (call.data or "").split(":")
+    if len(parts) != 4:
+        await call.answer("Ошибка действия.", show_alert=True)
+        return
+    try:
+        chat_id = int(parts[1])
+        target_id = int(parts[3])
+    except ValueError:
+        await call.answer("Ошибка действия.", show_alert=True)
+        return
+    action = parts[2]
+    game = MAFIA_GAMES.get(chat_id)
+    if not game:
+        await call.answer("Игра уже завершена.", show_alert=True)
+        return
+
+    uid = call.from_user.id
+    player = game["players"].get(uid)
+    target = game["players"].get(target_id)
+    if not player or not player["alive"] or not target or not target["alive"]:
+        await call.answer("Это действие недоступно.", show_alert=True)
+        return
+    if uid == target_id and action != "heal":
+        await call.answer("Нельзя выбрать себя.", show_alert=True)
+        return
+
+    if action == "kill":
+        if game["phase"] != "night_mafia" or player["role"] != "mafia":
+            await call.answer("Сейчас ты не можешь это сделать.", show_alert=True)
+            return
+        if uid in game["mafia_choices"]:
+            await call.answer("Ты уже выбрал цель.", show_alert=True)
+            return
+        game["mafia_choices"][uid] = target_id
+        await call.answer("Цель выбрана.")
+        await mafia_advance_after_mafia(chat_id)
+        return
+
+    if action == "heal":
+        if game["phase"] != "night_doctor" or player["role"] != "doctor":
+            await call.answer("Сейчас ты не можешь это сделать.", show_alert=True)
+            return
+        if game["doctor_choice"] is not None:
+            await call.answer("Ты уже выбрал, кого лечить.", show_alert=True)
+            return
+        game["doctor_choice"] = target_id
+        await call.answer("Игрок выбран для лечения.")
+        await mafia_advance_after_doctor(chat_id)
+        return
+
+    if action == "check":
+        if game["phase"] != "night_sheriff" or player["role"] != "sheriff":
+            await call.answer("Сейчас ты не можешь это сделать.", show_alert=True)
+            return
+        if game["sheriff_choice"] is not None:
+            await call.answer("Ты уже проверил игрока этой ночью.", show_alert=True)
+            return
+        game["sheriff_choice"] = target_id
+        if target["role"] == "mafia":
+            await call.answer("Ты нашёл мафию!", show_alert=True)
+            await mafia_finish(chat_id, "⭐ Шериф обнаружил мафию! Победа мирных жителей.")
+            return
+        await call.answer("Это не мафия.", show_alert=True)
+        await bot.send_message(uid, "🔎 Проверка завершена: выбранный игрок не мафия.")
+        await mafia_resolve_night(chat_id)
+        return
+
+    if action == "vote":
+        if game["phase"] != "voting":
+            await call.answer("Сейчас голосование не идёт.", show_alert=True)
+            return
+        if uid in game["votes"]:
+            await call.answer("Ты уже проголосовал.", show_alert=True)
+            return
+        game["votes"][uid] = target_id
+        await call.answer("Голос принят.")
+        await bot.send_message(uid, "🗳 Твой голос учтён.")
+        await mafia_resolve_votes(chat_id)
+        return
+
+    await call.answer("Неизвестное действие.", show_alert=True)
+
+
+@dp.message(Command("mafia_cancel"))
+async def cmd_mafia_cancel(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        return
+    game = MAFIA_GAMES.get(message.chat.id)
+    if not game:
+        await message.answer("Активной игры нет.")
+        return
+    if game["phase"] != "lobby":
+        await message.answer("Отменить уже начавшуюся игру этой командой нельзя.")
+        return
+    MAFIA_GAMES.pop(message.chat.id, None)
+    await message.answer("Игра в мафию отменена.")
+
+
+
 # ==================== ОБЩИЙ ФИЛЬТР ====================
 
 @dp.message()
@@ -2485,6 +3031,23 @@ async def filter_messages(message: types.Message):
         except Exception as e:
             print(f"Не удалил сервисное: {e}")
         return
+
+    # Во время мафии писать могут только живые участники и только в фазе обсуждения.
+    mafia_game = MAFIA_GAMES.get(message.chat.id)
+    if mafia_game and mafia_game.get("phase") != "lobby":
+        uid = message.from_user.id if message.from_user else None
+        participant = mafia_game["players"].get(uid) if uid is not None else None
+        can_write = (
+            mafia_game.get("phase") == "discussion"
+            and participant is not None
+            and participant.get("alive", False)
+        )
+        if not can_write:
+            try:
+                await message.delete()
+            except Exception as e:
+                print(f"Не удалось удалить сообщение во время мафии: {e}")
+            return
 
     if not message.text:
         return
@@ -2552,6 +3115,7 @@ async def set_commands():
         types.BotCommand(command="dice", description="Кубик"),
         types.BotCommand(command="coin", description="Орёл/решка"),
         types.BotCommand(command="ball", description="Магический шар"),
+        types.BotCommand(command="mafia", description="Создать игру в мафию"),
         types.BotCommand(command="stats", description="Статистика пользователя"),
         types.BotCommand(command="whoareyou", description="Кто этот пользователь"),
         types.BotCommand(command="delete", description="Удалить (reply)"),
