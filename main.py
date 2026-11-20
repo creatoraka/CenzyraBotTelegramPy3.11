@@ -1241,11 +1241,13 @@ async def cmd_help(message: types.Message):
         "• /rps — КНБ с ботом\n"
         "• /rps @user или reply — КНБ с участником (с его согласия)\n"
         "• /duel @user или reply — вызвать на дуэль\n"
+        "• /multi-duel 2 — коллективная дуэль на троих\n"
         "• /dice — бросить кубик (1–6)\n"
         "• /coin — орёл или решка\n"
         "• /ball &lt;вопрос&gt; — магический шар\n"
         "• /mafia — создать игру в мафию\n"
-        "• /mafia_cancel — отменить набор игроков\n\n"
+        "• /mafia_cancel — отменить набор (только создатель)\n"
+        "• /mafia_extend — продлить набор на 30 секунд (только создатель)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📊 <b>Статистика:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1548,7 +1550,7 @@ def rps_keyboard(game_id):
         InlineKeyboardButton(text="✊", callback_data=f"rps:{game_id}:rock"),
         InlineKeyboardButton(text="✌️", callback_data=f"rps:{game_id}:scissors"),
         InlineKeyboardButton(text="✋", callback_data=f"rps:{game_id}:paper"),
-    ]])
+    ], [InlineKeyboardButton(text="❌ Отменить", callback_data=f"rpsc:{game_id}")]])
 
 
 def rps_invite_keyboard(invite_id):
@@ -1564,18 +1566,44 @@ def rps_rematch_keyboard(rematch_id, count=0):
             text=f"🔄 Реванш ({count}/2)",
             callback_data=f"rpsr:{rematch_id}"
         )
-    ]])
+    ], [InlineKeyboardButton(text="❌ Отменить", callback_data=f"rpsrc:{rematch_id}")]])
 
 
 def make_game_id(chat_id, user_id):
     return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
 
 
+
+
+def update_pair_stats(store, game, winner_id=None):
+    key = (game["chat_id"], min(game["player_a"], game["player_b"]), max(game["player_a"], game["player_b"]))
+    stats = store.setdefault(key, {"games": 0, "wins_a": 0, "wins_b": 0, "draws": 0})
+    stats["games"] += 1
+    if winner_id is None:
+        stats["draws"] += 1
+    elif winner_id == game["player_a"]:
+        stats["wins_a"] += 1
+    else:
+        stats["wins_b"] += 1
+    return stats
+
+def pair_score_text(store, game):
+    key = (game["chat_id"], min(game["player_a"], game["player_b"]), max(game["player_a"], game["player_b"]))
+    st = store.get(key, {"games": 0, "wins_a": 0, "wins_b": 0, "draws": 0})
+    if game["player_a"] <= game["player_b"]:
+        score = f"{st['wins_a']}:{st['wins_b']}"
+    else:
+        score = f"{st['wins_b']}:{st['wins_a']}"
+    return f"📊 Матчей: {st['games']} | Счёт: <b>{score}</b> | Ничьих: {st['draws']}"
+
 # ==================== ДУЭЛИ ====================
 
 DUEL_GAMES = {}
 DUEL_INVITES = {}
 DUEL_REMATCH = {}
+DUEL_STATS = {}
+RPS_STATS = {}
+MULTI_DUELS = {}
 
 
 def duel_keyboard(game_id):
@@ -1590,6 +1618,7 @@ def duel_keyboard(game_id):
         [
             InlineKeyboardButton(text="🛡 Уклониться", callback_data=f"duel:{game_id}:dodge"),
         ],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"duelc:{game_id}")],
     ])
 
 
@@ -1606,7 +1635,7 @@ def duel_rematch_keyboard(rematch_id, count=0):
             text=f"🔄 Реванш ({count}/2)",
             callback_data=f"duelr:{rematch_id}"
         )
-    ]])
+    ], [InlineKeyboardButton(text="❌ Отменить", callback_data=f"duelrc:{rematch_id}")]])
 
 
 def create_duel(data):
@@ -1705,6 +1734,21 @@ async def cmd_duel(message: types.Message):
 
 async def handle_duel_callback(call: CallbackQuery) -> bool:
     data = call.data or ""
+
+    if data.startswith("duelc:"):
+        game_id = data.split(":", 1)[1]
+        game = DUEL_GAMES.get(game_id)
+        if not game or call.from_user.id not in (game["player_a"], game["player_b"]):
+            await call.answer("Отменить может только участник.", show_alert=True); return True
+        DUEL_GAMES.pop(game_id, None)
+        await call.message.edit_text("❌ Дуэль отменена участником.")
+        await call.answer("Дуэль отменена."); return True
+    if data.startswith("duelrc:"):
+        rid = data.split(":", 1)[1]; rem = DUEL_REMATCH.get(rid)
+        if not rem or call.from_user.id not in rem["players"]:
+            await call.answer("Недоступно.", show_alert=True); return True
+        DUEL_REMATCH.pop(rid, None)
+        await call.message.edit_text("❌ Реванш отменён."); await call.answer("Отменено."); return True
 
     # Принятие или отклонение приглашения.
     if data.startswith("dueli:"):
@@ -1864,12 +1908,15 @@ async def handle_duel_callback(call: CallbackQuery) -> bool:
                     "a_mention": game["a_mention"],
                     "b_mention": game["b_mention"],
                 }
+                stats = update_pair_stats(DUEL_STATS, game, game[f"player_{slot}"])
+                score_line = pair_score_text(DUEL_STATS, game)
                 DUEL_GAMES.pop(game_id, None)
                 await call.message.edit_text(
                     f"⚔️ <b>ДУЭЛЬ ЗАВЕРШЕНА!</b>\n\n"
                     f"🔫 {winner_mention} попадает в {loser_mention}!\n"
                     f"🎯 Точность выстрела: <b>{chance}%</b>\n\n"
-                    f"🏆 Победитель: {winner_mention}\n\n"
+                    f"🏆 Победитель: {winner_mention}\n"
+                    f"{score_line}\n\n"
                     f"Хотите реванш?",
                     reply_markup=duel_rematch_keyboard(rematch_id)
                 )
@@ -1995,10 +2042,21 @@ async def resolve_target_for_rps(message: types.Message):
     return None, None
 
 
-@dp.callback_query()
+@dp.callback_query(lambda c: (c.data or "").startswith(("rps:", "rpsi:", "rpsr:", "rpsc:", "rpsrc:", "duel:", "dueli:", "duelr:", "duelc:", "duelrc:")))
 async def rps_callback(call: CallbackQuery):
     if await handle_duel_callback(call):
         return
+
+    if call.data.startswith("rpsc:"):
+        gid = call.data.split(":", 1)[1]; game = RPS_GAMES.get(gid)
+        if not game or call.from_user.id not in (game["player_a"], game["player_b"]):
+            await call.answer("Отменить может только участник.", show_alert=True); return
+        RPS_GAMES.pop(gid, None); await call.message.edit_text("❌ Игра в КНБ отменена."); await call.answer("Отменено."); return
+    if call.data.startswith("rpsrc:"):
+        rid = call.data.split(":", 1)[1]; rem = RPS_REMATCH.get(rid)
+        if not rem or call.from_user.id not in rem["players"]:
+            await call.answer("Недоступно.", show_alert=True); return
+        RPS_REMATCH.pop(rid, None); await call.message.edit_text("❌ Реванш отменён."); await call.answer("Отменено."); return
 
     # --- реванш ---
     if call.data.startswith("rpsr:"):
@@ -2194,6 +2252,9 @@ async def rps_callback(call: CallbackQuery):
             else:
                 verdict = f"🏆 Победил {game['b_mention']}!"
 
+            winner_id = None if result == "draw" else (game["player_a"] if result == "a" else game["player_b"])
+            update_pair_stats(RPS_STATS, game, winner_id)
+            score_line = pair_score_text(RPS_STATS, game)
             # создаём реванш
             rematch_id = f"{game['chat_id']}_{game['player_a']}_{game['player_b']}_{random.randint(10000, 99999)}"
             RPS_REMATCH[rematch_id] = {
@@ -2213,7 +2274,7 @@ async def rps_callback(call: CallbackQuery):
                     f"🎮 <b>КНБ результат</b>\n\n"
                     f"👤 {game['a_mention']}: {RPS_CHOICES[ca]}\n"
                     f"👤 {game['b_mention']}: {RPS_CHOICES[cb]}\n\n"
-                    f"<b>{verdict}</b>",
+                    f"<b>{verdict}</b>\n\n{score_line}",
                     reply_markup=rps_rematch_keyboard(rematch_id, 0)
                 )
             except Exception:
@@ -2468,22 +2529,107 @@ async def cmd_unmute(message: types.Message):
 
 
 
+# ==================== КОЛЛЕКТИВНАЯ ДУЭЛЬ ====================
+
+def multi_duel_keyboard(game_id, game):
+    rows = []
+    if game["phase"] == "lobby":
+        rows.append([InlineKeyboardButton(text=f"➕ Участвовать ({len(game['players'])}/{game['limit']+1})", callback_data=f"mdjoin:{game_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="🔫 Выбрать цель", callback_data=f"mdtargets:{game_id}")])
+    rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data=f"mdcancel:{game_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@dp.message(Command("multi-duel"))
+async def cmd_multi_duel(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE or not message.from_user: return
+    args = (message.text or "").split()
+    try: extra = int(args[1])
+    except (IndexError, ValueError):
+        await message.reply("Использование: /multi-duel 2 (пригласить ещё двух игроков)"); return
+    if not 1 <= extra <= 9:
+        await message.reply("Можно пригласить от 1 до 9 дополнительных игроков."); return
+    gid = make_game_id(message.chat.id, message.from_user.id)
+    game = {"chat_id": message.chat.id, "creator": message.from_user.id, "limit": extra,
+            "players": {message.from_user.id: message.from_user.full_name}, "alive": [],
+            "order": [message.from_user.id], "phase": "lobby", "current_uid": None}
+    MULTI_DUELS[gid] = game
+    await message.answer(f"⚔️ <b>Коллективная дуэль</b>\nСоздатель: {message.from_user.mention_html()}\nНужно участников: {extra+1}.\nНажмите, чтобы присоединиться.", reply_markup=multi_duel_keyboard(gid, game))
+
+@dp.callback_query(lambda c: (c.data or "").startswith(("mdjoin:", "mdtargets:", "mdtarget:", "mdcancel:")))
+async def multi_duel_callback(call: CallbackQuery):
+    parts = call.data.split(":"); action, gid = parts[0], parts[1]
+    game = MULTI_DUELS.get(gid)
+    if not game: await call.answer("Игра уже завершена.", show_alert=True); return
+    uid = call.from_user.id
+    if action == "mdcancel":
+        if uid != game["creator"]: await call.answer("Отменить может создатель.", show_alert=True); return
+        MULTI_DUELS.pop(gid, None); await call.message.edit_text("❌ Коллективная дуэль отменена."); await call.answer(); return
+    if action == "mdjoin":
+        if game["phase"] != "lobby": await call.answer("Набор закрыт.", show_alert=True); return
+        if uid in game["players"]: await call.answer("Ты уже участвуешь."); return
+        if len(game["players"]) >= game["limit"] + 1: await call.answer("Мест больше нет.", show_alert=True); return
+        game["players"][uid] = call.from_user.full_name
+        game["order"].append(uid)
+        if len(game["players"]) == game["limit"] + 1:
+            game["alive"] = list(game["order"]); game["phase"] = "active"
+            game["current_uid"] = game["alive"][0]
+            text = "⚔️ <b>Коллективная дуэль началась!</b>\n" + "\n".join(f"{i+1}. {n}" for i,n in enumerate(game["players"].values())) + f"\n\nПервый ход: {game['players'][game['current_uid']]}"
+        else:
+            text = f"⚔️ Коллективная дуэль\nУчастники: {len(game['players'])}/{game['limit']+1}\n" + "\n".join(game["players"].values())
+        await call.message.edit_text(text, reply_markup=multi_duel_keyboard(gid, game)); await call.answer("Ты в игре!"); return
+    if action == "mdtargets":
+        if game["phase"] != "active" or game["current_uid"] != uid:
+            await call.answer("Сейчас не твой ход.", show_alert=True); return
+        rows = [[InlineKeyboardButton(text=game["players"][target], callback_data=f"mdtarget:{gid}:{target}")] for target in game["alive"] if target != uid]
+        await call.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows + [[InlineKeyboardButton(text="❌ Отменить", callback_data=f"mdcancel:{gid}")]]))
+        await call.answer("Выбери, кого выбить."); return
+    if action == "mdtarget":
+        target = int(parts[2])
+        if game["phase"] != "active" or game["current_uid"] != uid or target not in game["alive"] or target == uid:
+            await call.answer("Этот ход недоступен.", show_alert=True); return
+        game["alive"].remove(target)
+        shooter = game["players"][uid]; eliminated = game["players"][target]
+        if len(game["alive"]) == 1:
+            winner = game["players"][game["alive"][0]]; MULTI_DUELS.pop(gid, None)
+            await call.message.edit_text(f"⚔️ <b>Коллективная дуэль завершена!</b>\n{shooter} выбил {eliminated}.\n🏆 Победитель: <b>{winner}</b>", reply_markup=None)
+        else:
+            current_index = game["order"].index(uid)
+            for offset in range(1, len(game["order"]) + 1):
+                candidate = game["order"][(current_index + offset) % len(game["order"])]
+                if candidate in game["alive"]:
+                    game["current_uid"] = candidate; break
+            next_uid = game["current_uid"]
+            await call.message.edit_text(f"⚔️ <b>Коллективная дуэль</b>\n{shooter} выбил {eliminated}.\nОстались: " + ", ".join(game["players"][x] for x in game["alive"]) + f"\n\nХод: <b>{game['players'][next_uid]}</b>", reply_markup=multi_duel_keyboard(gid, game))
+        await call.answer("Игрок выбыл."); return
+
+
 # ==================== МАФИЯ ====================
 
 MAFIA_GAMES = {}
 MAFIA_DISCUSSION_SECONDS = 180
+MAFIA_LOBBY_SECONDS = 120
+MAFIA_MAX_PLAYERS = 10
 
 
-def mafia_join_keyboard(chat_id: int, can_start: bool = False):
+def mafia_lobby_text(game):
+    names = [mafia_mention(uid, p["name"]) for uid, p in game["players"].items()]
+    players_text = "\n".join(f"{i+1}. {name}" for i, name in enumerate(names)) or "Пока никого нет"
+    creator = mafia_mention(game["creator_id"], game["creator_name"])
+    remaining = max(0, int(game.get("lobby_deadline", 0) - asyncio.get_running_loop().time()))
+    return (f"🎭 <b>Новая игра в мафию!</b>\n\n"
+            f"Создатель: {creator}\n"
+            f"Игроки ({len(game['players'])}/{MAFIA_MAX_PLAYERS}):\n{players_text}\n\n"
+            f"Набор: 2 минуты (осталось примерно {remaining} сек.)\n"
+            "Для старта нужно минимум 4 игрока.")
+
+def mafia_join_keyboard(chat_id: int, count: int = 0):
     rows = [[InlineKeyboardButton(
-        text="🎭 Зайти в игру",
+        text=f"🎭Зайти в игру ({count}/{MAFIA_MAX_PLAYERS})",
         callback_data=f"mafia_join:{chat_id}"
     )]]
-    if can_start:
-        rows.append([InlineKeyboardButton(
-            text="▶️ Начать игру",
-            callback_data=f"mafia_start:{chat_id}"
-        )])
+    if count >= 4:
+        rows.append([InlineKeyboardButton(text="▶️ Начать игру", callback_data=f"mafia_start:{chat_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2793,6 +2939,49 @@ async def mafia_resolve_votes(chat_id: int):
     await mafia_start_night(chat_id)
 
 
+async def mafia_refresh_lobby(chat_id):
+    game = MAFIA_GAMES.get(chat_id)
+    if not game or game.get("phase") != "lobby": return
+    try:
+        await bot.edit_message_text(mafia_lobby_text(game), chat_id, game["lobby_message_id"],
+                                    reply_markup=mafia_join_keyboard(chat_id, len(game["players"])))
+    except Exception:
+        pass
+
+async def mafia_lobby_timeout(chat_id):
+    try:
+        while True:
+            game = MAFIA_GAMES.get(chat_id)
+            if not game or game.get("phase") != "lobby": return
+            remaining = game.get("lobby_deadline", 0) - asyncio.get_running_loop().time()
+            if remaining <= 0: break
+            await asyncio.sleep(remaining)
+        game = MAFIA_GAMES.get(chat_id)
+        if game and game.get("phase") == "lobby":
+            MAFIA_GAMES.pop(chat_id, None)
+            try:
+                await bot.edit_message_text("⌛ Время набора истекло. Игра в мафию не началась.",
+                                            chat_id, game["lobby_message_id"], reply_markup=None)
+            except Exception: pass
+    except asyncio.CancelledError:
+        return
+
+@dp.message(Command("mafia_extend"))
+@dp.message(Command("mafia_add_time"))
+async def cmd_mafia_extend(message: types.Message):
+    game = MAFIA_GAMES.get(message.chat.id)
+    if not game or game.get("phase") != "lobby":
+        await message.reply("Активного набора нет."); return
+    if not message.from_user or message.from_user.id != game["creator_id"]:
+        await message.reply("Только создатель игры может продлить набор."); return
+    task = game.get("lobby_task")
+    if task: task.cancel()
+    game["lobby_deadline"] = asyncio.get_running_loop().time() + 30
+    game["lobby_task"] = asyncio.create_task(mafia_lobby_timeout(chat_id=message.chat.id))
+    # Таймер после продления составляет ровно 30 секунд.
+    await mafia_refresh_lobby(message.chat.id)
+    await message.reply("⏱ Набор продлён ещё на 30 секунд.")
+
 @dp.message(Command("mafia"))
 @dp.message(Command("мафия"))
 async def cmd_mafia(message: types.Message):
@@ -2804,8 +2993,14 @@ async def cmd_mafia(message: types.Message):
         await message.answer("В этом чате уже есть активная игра или набор в мафию.")
         return
 
+    loop = asyncio.get_running_loop()
     MAFIA_GAMES[chat_id] = {
         "phase": "lobby",
+        "creator_id": message.from_user.id,
+        "creator_name": message.from_user.full_name,
+        "lobby_deadline": loop.time() + MAFIA_LOBBY_SECONDS,
+        "lobby_message_id": None,
+        "lobby_task": None,
         "players": {},
         "round": 1,
         "votes": {},
@@ -2814,12 +3009,12 @@ async def cmd_mafia(message: types.Message):
         "sheriff_choice": None,
         "discussion_task": None,
     }
-    await message.answer(
-        "🎭 <b>Новая игра в мафию!</b>\n\n"
-        "Нажимайте «Зайти в игру». Для начала нужно минимум 4 игрока.\n"
-        "Когда все готовы, нажмите «Начать игру».",
-        reply_markup=mafia_join_keyboard(chat_id)
+    lobby_msg = await message.answer(
+        mafia_lobby_text(MAFIA_GAMES[chat_id]),
+        reply_markup=mafia_join_keyboard(chat_id, 0)
     )
+    MAFIA_GAMES[chat_id]["lobby_message_id"] = lobby_msg.message_id
+    MAFIA_GAMES[chat_id]["lobby_task"] = asyncio.create_task(mafia_lobby_timeout(chat_id))
 
 
 @dp.callback_query(lambda c: (c.data or "").startswith("mafia_join:"))
@@ -2834,8 +3029,11 @@ async def mafia_join_callback(call: CallbackQuery):
         await call.answer("Набор уже закрыт.", show_alert=True)
         return
     if call.from_user.id in game["players"]:
-        await call.answer("Ты уже в игре.")
-        return
+        await call.answer("Ты уже в игре."); return
+    if len(game["players"]) >= MAFIA_MAX_PLAYERS:
+        await call.answer("Набор заполнен (10/10).", show_alert=True); return
+    if asyncio.get_running_loop().time() >= game.get("lobby_deadline", 0):
+        await call.answer("Время набора истекло.", show_alert=True); return
 
     game["players"][call.from_user.id] = {
         "name": call.from_user.full_name,
@@ -2843,13 +3041,8 @@ async def mafia_join_callback(call: CallbackQuery):
         "alive": True,
     }
     count = len(game["players"])
-    try:
-        await call.message.edit_reply_markup(
-            reply_markup=mafia_join_keyboard(chat_id, count >= 4)
-        )
-    except Exception:
-        pass
-    await call.answer(f"Ты в игре! Игроков: {count}")
+    await mafia_refresh_lobby(chat_id)
+    await call.answer(f"Ты в игре! Игроков: {count}/10")
 
 
 @dp.callback_query(lambda c: (c.data or "").startswith("mafia_start:"))
@@ -2863,9 +3056,12 @@ async def mafia_start_callback(call: CallbackQuery):
     if not game or game["phase"] != "lobby":
         await call.answer("Игра уже запущена или закрыта.", show_alert=True)
         return
+    if call.from_user.id != game["creator_id"]:
+        await call.answer("Начать игру может только её создатель.", show_alert=True); return
     if len(game["players"]) < 4:
         await call.answer("Нужно минимум 4 игрока.", show_alert=True)
         return
+    if game.get("lobby_task"): game["lobby_task"].cancel()
 
     player_ids = list(game["players"])
     roles = mafia_make_roles(player_ids)
@@ -3003,8 +3199,10 @@ async def cmd_mafia_cancel(message: types.Message):
         await message.answer("Активной игры нет.")
         return
     if game["phase"] != "lobby":
-        await message.answer("Отменить уже начавшуюся игру этой командой нельзя.")
-        return
+        await message.answer("Отменить уже начавшуюся игру этой командой нельзя."); return
+    if not message.from_user or message.from_user.id != game["creator_id"]:
+        await message.answer("Только создатель может отменить набор."); return
+    if game.get("lobby_task"): game["lobby_task"].cancel()
     MAFIA_GAMES.pop(message.chat.id, None)
     await message.answer("Игра в мафию отменена.")
 
