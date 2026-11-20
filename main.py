@@ -1240,6 +1240,7 @@ async def cmd_help(message: types.Message):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "• /rps — КНБ с ботом\n"
         "• /rps @user или reply — КНБ с участником (с его согласия)\n"
+        "• /duel @user или reply — вызвать на дуэль\n"
         "• /dice — бросить кубик (1–6)\n"
         "• /coin — орёл или решка\n"
         "• /ball &lt;вопрос&gt; — магический шар\n\n"
@@ -1568,6 +1569,335 @@ def make_game_id(chat_id, user_id):
     return f"{chat_id}_{user_id}_{random.randint(100000, 999999)}"
 
 
+# ==================== ДУЭЛИ ====================
+
+DUEL_GAMES = {}
+DUEL_INVITES = {}
+DUEL_REMATCH = {}
+
+
+def duel_keyboard(game_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎯 Прицелиться", callback_data=f"duel:{game_id}:aim"),
+            InlineKeyboardButton(text="🔫 Выстрелить", callback_data=f"duel:{game_id}:shoot"),
+        ],
+        [
+            InlineKeyboardButton(text="💨 Сбросить прицел соперника", callback_data=f"duel:{game_id}:reset"),
+        ],
+        [
+            InlineKeyboardButton(text="🛡 Уклониться", callback_data=f"duel:{game_id}:dodge"),
+        ],
+    ])
+
+
+def duel_invite_keyboard(invite_id):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"dueli:{invite_id}:yes"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"dueli:{invite_id}:no"),
+    ]])
+
+
+def duel_rematch_keyboard(rematch_id, count=0):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"🔄 Реванш ({count}/2)",
+            callback_data=f"duelr:{rematch_id}"
+        )
+    ]])
+
+
+def create_duel(data):
+    game_id = make_game_id(data["chat_id"], data["a_id"])
+    DUEL_GAMES[game_id] = {
+        "chat_id": data["chat_id"],
+        "player_a": data["a_id"],
+        "player_b": data["b_id"],
+        "a_name": data["a_name"],
+        "b_name": data["b_name"],
+        "a_mention": data["a_mention"],
+        "b_mention": data["b_mention"],
+        "turn": "a",
+        "aim_a": 0,
+        "aim_b": 0,
+        "dodge_a": False,
+        "dodge_b": False,
+    }
+    return game_id
+
+
+def duel_chance(aim):
+    # 20% без прицела, +15% за каждый уровень, максимум 90%.
+    return min(90, 20 + aim * 15)
+
+
+def duel_status(game):
+    return (
+        f"🎯 Прицел {game['a_mention']}: <b>{game['aim_a']}</b> "
+        f"({duel_chance(game['aim_a'])}%)\n"
+        f"🎯 Прицел {game['b_mention']}: <b>{game['aim_b']}</b> "
+        f"({duel_chance(game['aim_b'])}%)\n\n"
+        f"🛡 Уклонение {game['a_mention']}: "
+        f"{'готово' if game['dodge_a'] else 'нет'}\n"
+        f"🛡 Уклонение {game['b_mention']}: "
+        f"{'готово' if game['dodge_b'] else 'нет'}"
+    )
+
+
+@dp.message(Command("duel"))
+@dp.message(Command("дуэль"))
+async def cmd_duel(message: types.Message):
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply("❌ Дуэли доступны только в группах.")
+        return
+
+    if not message.from_user:
+        return
+
+    cache_user(message.chat.id, message.from_user)
+    target_id, target_name = await resolve_target_for_rps(message)
+
+    if target_id is None:
+        await message.reply(
+            "❌ Укажи соперника через reply или @username.\n"
+            "Пример: <code>/duel @username</code>"
+        )
+        return
+
+    if target_id == message.from_user.id:
+        await message.reply("❌ Нельзя вызвать на дуэль самого себя.")
+        return
+
+    if target_id == BOT_ID:
+        await message.reply("🤖 Бота нельзя вызвать на дуэль.")
+        return
+
+    # Не даём одному человеку получать несколько активных приглашений в этом чате.
+    if any(
+        inv["chat_id"] == message.chat.id and inv["to_id"] == target_id
+        for inv in DUEL_INVITES.values()
+    ):
+        await message.reply("❌ У этого пользователя уже есть приглашение на дуэль.")
+        return
+
+    invite_id = f"{message.chat.id}_{random.randint(1000000, 9999999)}"
+    DUEL_INVITES[invite_id] = {
+        "chat_id": message.chat.id,
+        "a_id": message.from_user.id,
+        "b_id": target_id,
+        "a_name": message.from_user.full_name,
+        "b_name": target_name,
+        "a_mention": message.from_user.mention_html(),
+        "b_mention": f'<a href="tg://user?id={target_id}">{target_name}</a>',
+    }
+
+    await message.answer(
+        f"⚔️ <b>Вызов на дуэль!</b>\n\n"
+        f"{message.from_user.mention_html()} вызывает "
+        f'<a href="tg://user?id={target_id}">{target_name}</a>.\n'
+        f"Первым ходит вызывающий.\n\n"
+        f"Принять вызов?",
+        reply_markup=duel_invite_keyboard(invite_id)
+    )
+
+
+async def handle_duel_callback(call: CallbackQuery) -> bool:
+    data = call.data or ""
+
+    # Принятие или отклонение приглашения.
+    if data.startswith("dueli:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка приглашения.", show_alert=True)
+            return True
+
+        _, invite_id, action = parts
+        invite = DUEL_INVITES.get(invite_id)
+        if not invite:
+            await call.answer("Приглашение уже недоступно.", show_alert=True)
+            return True
+
+        if call.from_user.id != invite["b_id"]:
+            await call.answer("Это приглашение не тебе.", show_alert=True)
+            return True
+
+        DUEL_INVITES.pop(invite_id, None)
+
+        if action == "no":
+            await call.message.edit_text(
+                f"⚔️ <b>Дуэль отклонена.</b>\n\n{invite['b_mention']} "
+                f"отклонил вызов от {invite['a_mention']}."
+            )
+            await call.answer("Вызов отклонён.")
+            return True
+
+        game_id = create_duel(invite)
+        game = DUEL_GAMES[game_id]
+        await call.message.edit_text(
+            f"⚔️ <b>ДУЭЛЬ НАЧАЛАСЬ!</b>\n\n"
+            f"{game['a_mention']} против {game['b_mention']}\n\n"
+            f"Первым ходит вызывающий: {game['a_mention']}\n\n"
+            f"{duel_status(game)}",
+            reply_markup=duel_keyboard(game_id)
+        )
+        await call.answer("Дуэль принята!")
+        return True
+
+    # Реванш: должны согласиться оба участника.
+    if data.startswith("duelr:"):
+        rematch_id = data.split(":", 1)[1]
+        rematch = DUEL_REMATCH.get(rematch_id)
+        if not rematch:
+            await call.answer("Реванш уже недоступен.", show_alert=True)
+            return True
+
+        user_id = call.from_user.id
+        if user_id not in rematch["players"]:
+            await call.answer("Реванш доступен только участникам.", show_alert=True)
+            return True
+
+        if user_id in rematch["clicked"]:
+            await call.answer("Ты уже согласился на реванш.", show_alert=True)
+            return True
+
+        rematch["clicked"].add(user_id)
+        count = len(rematch["clicked"])
+
+        if count < 2:
+            try:
+                await call.message.edit_reply_markup(
+                    reply_markup=duel_rematch_keyboard(rematch_id, count)
+                )
+            except Exception:
+                pass
+            await call.answer(f"Согласны на реванш: {count}/2")
+            return True
+
+        DUEL_REMATCH.pop(rematch_id, None)
+        game_id = create_duel(rematch)
+        game = DUEL_GAMES[game_id]
+        await call.message.edit_text(
+            f"⚔️ <b>РЕВАНШ!</b>\n\n"
+            f"{game['a_mention']} против {game['b_mention']}\n\n"
+            f"Первым снова ходит вызывающий: {game['a_mention']}\n\n"
+            f"{duel_status(game)}",
+            reply_markup=duel_keyboard(game_id)
+        )
+        await call.answer("Реванш начинается!")
+        return True
+
+    # Ход в дуэли.
+    if data.startswith("duel:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await call.answer("Ошибка хода.", show_alert=True)
+            return True
+
+        _, game_id, action = parts
+        game = DUEL_GAMES.get(game_id)
+        if not game:
+            await call.answer("Дуэль уже завершена.", show_alert=True)
+            return True
+
+        user_id = call.from_user.id
+        if user_id == game["player_a"]:
+            slot, enemy = "a", "b"
+        elif user_id == game["player_b"]:
+            slot, enemy = "b", "a"
+        else:
+            await call.answer("Ты не участник этой дуэли.", show_alert=True)
+            return True
+
+        if game["turn"] != slot:
+            await call.answer("Сейчас ход соперника.", show_alert=True)
+            return True
+
+        if action not in ("aim", "shoot", "reset", "dodge"):
+            await call.answer("Неизвестное действие.", show_alert=True)
+            return True
+
+        # Выстрел разрешается сразу, проверяя уклонение противника.
+        if action == "aim":
+            game[f"aim_{slot}"] += 1
+            result_line = (
+                f"🎯 {game[f'{slot}_mention']} прицеливается. "
+                f"Точность теперь <b>{duel_chance(game[f'aim_{slot}'])}%</b>."
+            )
+        elif action == "reset":
+            game[f"aim_{enemy}"] = 0
+            result_line = (
+                f"💨 {game[f'{slot}_mention']} сбрасывает прицел соперника!"
+            )
+        elif action == "dodge":
+            game[f"dodge_{slot}"] = True
+            result_line = (
+                f"🛡 {game[f'{slot}_mention']} приготовился уклониться "
+                f"от следующего выстрела."
+            )
+        else:  # shoot
+            chance = duel_chance(game[f"aim_{slot}"])
+            if game[f"dodge_{enemy}"]:
+                game[f"dodge_{enemy}"] = False
+                game[f"aim_{slot}"] = 0
+                result_line = (
+                    f"🔫 {game[f'{slot}_mention']} стреляет, но "
+                    f"{game[f'{enemy}_mention']} уклоняется!\n"
+                    f"🎯 Прицел стрелявшего сброшен."
+                )
+            elif random.randint(1, 100) <= chance:
+                winner_mention = game[f"{slot}_mention"]
+                loser_mention = game[f"{enemy}_mention"]
+                rematch_id = (
+                    f"{game['chat_id']}_{game['player_a']}_"
+                    f"{game['player_b']}_{random.randint(10000, 99999)}"
+                )
+                DUEL_REMATCH[rematch_id] = {
+                    "players": {game["player_a"], game["player_b"]},
+                    "clicked": set(),
+                    "chat_id": game["chat_id"],
+                    "a_id": game["player_a"],
+                    "b_id": game["player_b"],
+                    "a_name": game["a_name"],
+                    "b_name": game["b_name"],
+                    "a_mention": game["a_mention"],
+                    "b_mention": game["b_mention"],
+                }
+                DUEL_GAMES.pop(game_id, None)
+                await call.message.edit_text(
+                    f"⚔️ <b>ДУЭЛЬ ЗАВЕРШЕНА!</b>\n\n"
+                    f"🔫 {winner_mention} попадает в {loser_mention}!\n"
+                    f"🎯 Точность выстрела: <b>{chance}%</b>\n\n"
+                    f"🏆 Победитель: {winner_mention}\n\n"
+                    f"Хотите реванш?",
+                    reply_markup=duel_rematch_keyboard(rematch_id)
+                )
+                await call.answer("Попадание!")
+                return True
+            else:
+                game[f"aim_{slot}"] = 0
+                result_line = (
+                    f"🔫 {game[f'{slot}_mention']} промахивается!\n"
+                    f"🎯 Его прицел сброшен."
+                )
+
+        # После любого действия ход переходит сопернику.
+        game["turn"] = enemy
+        next_mention = game[f"{enemy}_mention"]
+        await call.message.edit_text(
+            f"⚔️ <b>ДУЭЛЬ</b>\n\n"
+            f"{game['a_mention']} против {game['b_mention']}\n\n"
+            f"{result_line}\n\n"
+            f"{duel_status(game)}\n\n"
+            f"👉 Следующий ход: {next_mention}",
+            reply_markup=duel_keyboard(game_id)
+        )
+        await call.answer("Ход выполнен.")
+        return True
+
+    return False
+
+
+
 @dp.message(Command("rps"))
 @dp.message(Command("кнб"))
 async def cmd_rps(message: types.Message):
@@ -1665,6 +1995,9 @@ async def resolve_target_for_rps(message: types.Message):
 
 @dp.callback_query()
 async def rps_callback(call: CallbackQuery):
+    if await handle_duel_callback(call):
+        return
+
     # --- реванш ---
     if call.data.startswith("rpsr:"):
         rematch_id = call.data.split(":", 1)[1]
@@ -2215,6 +2548,7 @@ async def set_commands():
         types.BotCommand(command="help", description="Все команды"),
         types.BotCommand(command="everyone", description="Созвать всех"),
         types.BotCommand(command="rps", description="КНБ с ботом или @user"),
+        types.BotCommand(command="duel", description="Вызвать на дуэль"),
         types.BotCommand(command="dice", description="Кубик"),
         types.BotCommand(command="coin", description="Орёл/решка"),
         types.BotCommand(command="ball", description="Магический шар"),
